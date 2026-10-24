@@ -12,6 +12,9 @@ ENV/
 *.session
 *.session-journal
 .env
+*.secrets.json
+*.lock
+scratch/
 configs/gallery-dl.json
 configs/terabox-dl.json
 configs/telegram-dl.json
@@ -27,6 +30,11 @@ data/*.db
 data/archives/
 data/queue.json
 data/batch_queue.json
+data/batches/
+data/last_batch.json
+data/pending_archive/
+data/transient/
+data/gallery_locks/
 data/live_queue.json
 data/failed_links.txt
 data/clipboard_history.txt

@@ -36,16 +36,11 @@ from core.terminal import Style, str_width, truncate_to_width
 
 
 def _sigint_handler(signum=None, frame=None):
-    """Guarantees instant termination on Ctrl+C on Windows without getting stuck on blocked worker threads."""
+    """Request graceful interruption so workers can preserve resumable queue state."""
     sys.stdout.write(f"\n\n{Style.tag('🛑', 'ABORTED', Style.RED)} {Style.error('Operation cancelled by user.')}\n")
     sys.stdout.flush()
-    os._exit(130)
+    raise KeyboardInterrupt
 
-
-try:
-    signal.signal(signal.SIGINT, _sigint_handler)
-except (ValueError, AttributeError):
-    pass
 
 from backends.gallerydl_backend import GalleryDlBackend
 from backends.telegram_backend import TelegramDlBackend
@@ -56,6 +51,7 @@ from core.archive import ArchiveManager
 from core.clipboard import (
     ClipboardWatcher,
     clear_failed_urls,
+    clear_clipboard_history,
     load_failed_urls,
     play_chime,
     CLIPBOARD_HISTORY_PATH,
@@ -67,6 +63,33 @@ from core.models import ArchiveEntry, DownloadProgress, DownloadTask, TaskStatus
 from core.queue_manager import QueueManager
 from core.router import URLRouter
 from core.updater import EngineUpdater
+from core.models import BatchSummaryReport
+from core.storage import atomic_json_write
+import uuid
+
+
+def new_batch_queue():
+    queue_file = PROJECT_ROOT / 'data' / 'batches' / (str(uuid.uuid4()) + '.json')
+    atomic_json_write(PROJECT_ROOT / 'data' / 'last_batch.json', {'queue_file': str(queue_file)})
+    return QueueManager(queue_file)
+
+
+def last_batch_file():
+    pointer = PROJECT_ROOT / 'data' / 'last_batch.json'
+    if pointer.exists():
+        candidate = Path(json.loads(pointer.read_text(encoding='utf-8'))['queue_file']).resolve()
+        if candidate.is_relative_to((PROJECT_ROOT / 'data' / 'batches').resolve()):
+            return candidate
+        raise ConfigError('Invalid batch queue pointer')
+    return PROJECT_ROOT / 'data' / 'batch_queue.json'
+
+
+def run_download(coroutine):
+    report = asyncio.run(coroutine)
+    if isinstance(report, BatchSummaryReport) and report.failed_count:
+        raise SystemExit(1)
+    return report
+
 
 
 def format_bytes(size: int) -> str:
@@ -77,37 +100,6 @@ def format_bytes(size: int) -> str:
         size /= 1024.0
     return f"{size:.2f} PB"
 
-
-def print_progress(p: DownloadProgress):
-    """Terminal progress renderer with aligned, colored output and visual progress bar."""
-    if p.percent is not None:
-        percent_text = f"{p.percent:5.1f}%"
-        tag_color = Style.GREEN if p.percent >= 100.0 else Style.CYAN
-    else:
-        percent_text = "  --% "
-        tag_color = Style.CYAN
-
-    tag_part = Style.tag("📥", percent_text, tag_color)
-    bar_part = Style.progress_bar(p.percent, width=20)
-
-    downloaded_str = format_bytes(p.downloaded_bytes) if p.downloaded_bytes else "0 B"
-    total_str = format_bytes(p.total_bytes) if p.total_bytes else "??"
-    sizes_part = f"{Style.white(downloaded_str)} / {Style.white(total_str)}"
-
-    speed_val = f"{format_bytes(int(p.speed_bytes_sec))}/s" if p.speed_bytes_sec else "--"
-    speed_part = f"{Style.dim('@')} {Style.speed(speed_val)}"
-
-    eta_part = ""
-    if p.eta_seconds and p.eta_seconds > 0 and (p.percent is None or p.percent < 100.0):
-        eta_m, eta_s = divmod(int(p.eta_seconds), 60)
-        eta_part = f" {Style.dim('ETA')} {Style.yellow(f'{eta_m:02d}:{eta_s:02d}')}"
-
-    batch_part = ""
-    if p.total_files and p.total_files > 1 and p.file_index:
-        batch_part = f" {Style.dim('(')}{Style.cyan(f'{p.file_index}/{p.total_files}')}{Style.dim(')')}"
-
-    sys.stdout.write(f"\r\033[K{tag_part} {bar_part} {sizes_part}{batch_part} {speed_part}{eta_part}")
-    sys.stdout.flush()
 
 
 def extract_inline_options(raw_line: str) -> Tuple[str, Dict[str, Any]]:
@@ -363,12 +355,12 @@ async def download_url(url: str, backend_name: str = None, options: dict = None)
         config._data.setdefault("general", {})["notifications"] = False
         config._data.setdefault("general", {})["play_sound"] = False
 
-    batch_queue = QueueManager(PROJECT_ROOT / "data" / "batch_queue.json")
+    batch_queue = new_batch_queue()
     batch_queue.clear()
     batch_queue.add_batch([url], backend=backend_name, options=options)
 
     dispatcher = QueueDispatcher(config=config, queue_manager=batch_queue, archive=archive)
-    await dispatcher.run(concurrency=1)
+    return await dispatcher.run(concurrency=1)
 
 
 def print_banner(config: ConfigManager, archive: ArchiveManager) -> None:
@@ -435,7 +427,7 @@ def print_banner(config: ConfigManager, archive: ArchiveManager) -> None:
     print(f"{Style.CYAN}{header_mode}{'─' * mode_sep_len}{Style.RESET}")
     print(f"  {Style.dim('Enter URLs (use space for multiple URLs) or a text file. Right-click to paste.')}")
     cmds = [
-        Style.cyan('watch'), Style.cyan('open'), Style.cyan('archive'),
+        Style.cyan('watch'), Style.cyan('gui'), Style.cyan('open'), Style.cyan('archive'),
         Style.cyan('queue'), Style.cyan('retry'), Style.cyan('clear'),
         Style.cyan('config'), Style.cyan('update'), Style.cyan('help'),
         Style.cyan('exit'),
@@ -493,13 +485,12 @@ async def run_retry_failed(config: ConfigManager, archive: ArchiveManager) -> No
         print(f"  {Style.dim(f'... and {len(failed) - 5} more')}")
     print()
 
-    clear_failed_urls()
-
-    batch_queue = QueueManager(PROJECT_ROOT / "data" / "batch_queue.json")
+    batch_queue = new_batch_queue()
     batch_queue.clear()
     batch_queue.add_batch(failed)
+    clear_failed_urls()
     dispatcher = QueueDispatcher(config=config, queue_manager=batch_queue, archive=archive)
-    await dispatcher.run()
+    return await dispatcher.run()
 
 
 def setup_gallerydl_auth(config: ConfigManager) -> None:
@@ -1060,6 +1051,11 @@ async def interactive_mode():
             handle_proxy_command(config, parts)
             continue
 
+        # 2d. Launch Desktop GUI
+        if cmd_candidate in ("gui", "ui", "desktop"):
+            launch_desktop_gui(spawn_process=True)
+            continue
+
         # 3. Open downloads folder
         if cmd_candidate in ("open", "folder", "downloads"):
             dl_dir = config.download_dir
@@ -1203,7 +1199,7 @@ async def interactive_mode():
             else:
                 print(f"\n{Style.tag('📦', 'BATCH', Style.MAGENTA)} Detected {Style.bold(str(len(extracted_urls)))} links pasted\n")
 
-            batch_queue = QueueManager(PROJECT_ROOT / "data" / "batch_queue.json")
+            batch_queue = new_batch_queue()
             batch_queue.clear()
             batch_queue.add_batch(extracted_urls, backend=forced_backend, options=inline_opts)
 
@@ -1217,7 +1213,59 @@ async def interactive_mode():
         print(f"\n{Style.CYAN}{'─' * sep_width}{Style.RESET}\n")
 
 
+def launch_desktop_gui(spawn_process: bool = False) -> None:
+    """Launches the modern desktop GUI application with robust interpreter resolution."""
+    gui_script = PROJECT_ROOT / "multi-dl-gui.py"
+    if not gui_script.exists():
+        print(f"{Style.tag('❌', 'ERROR', Style.RED)} GUI script not found at: {gui_script}")
+        return
+
+    # Check if flet is available in current python or alternative interpreters
+    candidates = [sys.executable]
+    venv_py = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+    if venv_py.exists():
+        candidates.append(str(venv_py))
+    candidates.extend(["python", "pythonw"])
+
+    python_bin = None
+    for cand in candidates:
+        try:
+            res = subprocess.run([cand, "-c", "import flet"], capture_output=True, timeout=5)
+            if res.returncode == 0:
+                python_bin = cand
+                break
+        except Exception:
+            continue
+
+    if not python_bin:
+        print(f"\n{Style.tag('❌', 'DEPENDENCY MISSING', Style.RED)} Desktop GUI requires {Style.bold('flet')}.")
+        print(f"{Style.dim('   Please install it with: ')}{Style.cyan('pip install flet')} (or {Style.cyan('pip install -r requirements.txt')})\n")
+        return
+
+    print(f"\n{Style.tag('🖥️', 'GUI', Style.CYAN)} Launching MULTI_DOWNLOADER Desktop GUI...")
+    if spawn_process:
+        try:
+            subprocess.Popen([python_bin, str(gui_script)])
+            print(f"{Style.tag('✅', 'LAUNCHED', Style.GREEN)} GUI process spawned in separate window.\n")
+        except Exception as e:
+            print(f"{Style.tag('❌', 'GUI ERROR', Style.RED)} Failed to start GUI: {e}\n")
+    else:
+        try:
+            import flet as ft
+            import importlib
+            gui_module = importlib.import_module("multi-dl-gui")
+            if hasattr(ft, "app"):
+                ft.app(target=gui_module.main)
+            elif hasattr(ft, "run"):
+                ft.run(gui_module.main)
+        except Exception:
+            subprocess.run([python_bin, str(gui_script)])
+
+
 def main():
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+
     raw_args = sys.argv[1:]
 
     # Interactive mode: running without arguments or with -i / --interactive / interactive
@@ -1264,6 +1312,10 @@ def main():
 
     # Fast-path for Clipboard Watcher: multi-dl watch / -w / --watch / clipboard
     if raw_args and raw_args[0] in ("watch", "clipboard", "--watch", "-w"):
+        if '--clear-history' in raw_args:
+            clear_clipboard_history()
+            print('Clipboard URL history cleared.')
+            return
         config = ConfigManager()
         archive = ArchiveManager(config.archive_db_path)
         asyncio.run(run_clipboard_watcher_session(config, archive))
@@ -1271,13 +1323,22 @@ def main():
 
     # Fast-path for Retry failed downloads: multi-dl retry / --retry
     if raw_args and raw_args[0] in ("retry", "--retry"):
+        if '--clear' in raw_args:
+            clear_failed_urls()
+            print('Failed-link recovery history cleared.')
+            return
         config = ConfigManager()
         archive = ArchiveManager(config.archive_db_path)
-        asyncio.run(run_retry_failed(config, archive))
+        run_download(run_retry_failed(config, archive))
+        return
+
+    # Fast-path for Desktop GUI: multi-dl gui / ui / --gui
+    if raw_args and raw_args[0] in ("gui", "ui", "--gui"):
+        launch_desktop_gui(spawn_process=False)
         return
 
     # Subcommands list
-    subcommands = {"archive", "route", "queue", "config", "update", "auth", "login", "download", "interactive", "watch", "retry", "proxy"}
+    subcommands = {"archive", "route", "queue", "config", "update", "auth", "login", "download", "interactive", "watch", "retry", "proxy", "gui", "ui"}
 
     # Direct URL or batch execution mode: e.g. python multi-dl.py urls.txt / python multi-dl.py https://... [-c 3]
     if raw_args and raw_args[0] not in subcommands and not raw_args[0].startswith("-h") and not raw_args[0] == "--help":
@@ -1365,7 +1426,7 @@ def main():
 
         # Single direct URL mode
         if len(extracted_urls) == 1 and not source_files and not parsed_direct.concurrency:
-            asyncio.run(download_url(extracted_urls[0], parsed_direct.backend, options=opts))
+            run_download(download_url(extracted_urls[0], parsed_direct.backend, options=opts))
             return
 
         # Immediate concurrent batch mode
@@ -1380,12 +1441,12 @@ def main():
             config._data.setdefault("general", {})["notifications"] = False
             config._data.setdefault("general", {})["play_sound"] = False
         archive = ArchiveManager(config.archive_db_path)
-        batch_queue = QueueManager(PROJECT_ROOT / "data" / "batch_queue.json")
+        batch_queue = new_batch_queue()
         batch_queue.clear()
         batch_queue.add_batch(extracted_urls, backend=parsed_direct.backend, options=opts)
 
         dispatcher = QueueDispatcher(config=config, queue_manager=batch_queue, archive=archive)
-        asyncio.run(dispatcher.run(concurrency=parsed_direct.concurrency))
+        run_download(dispatcher.run(concurrency=parsed_direct.concurrency))
         return
 
     # Subcommand mode: e.g. python multi-dl.py archive --stats
@@ -1411,6 +1472,10 @@ def main():
 
     # 'interactive' command
     subparsers.add_parser("interactive", help="Start interactive link pasting session")
+
+    # 'gui' command
+    subparsers.add_parser("gui", help="Launch MULTI_DOWNLOADER Modern Desktop GUI application")
+    subparsers.add_parser("ui", help="Alias for 'gui'")
 
     # 'auth' / 'login' command
     auth_parser = subparsers.add_parser("auth", help="Configure engine authentication (telegram, terabox, gallery-dl, all)")
@@ -1560,7 +1625,7 @@ def main():
         archive = ArchiveManager(config.archive_db_path)
 
         if len(extracted_urls) == 1 and not source_files and not getattr(args, "concurrency", None):
-            asyncio.run(download_url(extracted_urls[0], getattr(args, "backend", None), options=opts))
+            run_download(download_url(extracted_urls[0], getattr(args, "backend", None), options=opts))
             return
 
         if source_files:
@@ -1569,12 +1634,15 @@ def main():
         else:
             print(f"\n{Style.tag('📦', 'BATCH', Style.MAGENTA)} Ingested {Style.bold(str(len(extracted_urls)))} links for immediate concurrent download...")
 
-        batch_queue = QueueManager(PROJECT_ROOT / "data" / "batch_queue.json")
+        batch_queue = new_batch_queue()
         batch_queue.clear()
         batch_queue.add_batch(extracted_urls, backend=getattr(args, "backend", None), options=opts)
 
         dispatcher = QueueDispatcher(config=config, queue_manager=batch_queue, archive=archive)
-        asyncio.run(dispatcher.run(concurrency=getattr(args, "concurrency", None)))
+        run_download(dispatcher.run(concurrency=getattr(args, "concurrency", None)))
+        return
+    elif args.command in ("gui", "ui"):
+        launch_desktop_gui(spawn_process=False)
         return
     elif args.command == "config":
         config = ConfigManager()
@@ -1681,7 +1749,7 @@ def main():
             setup_gallerydl_auth(config)
     elif args.command == "queue":
         q_action = getattr(args, "queue_action", None)
-        queue_file = (PROJECT_ROOT / "data" / "batch_queue.json") if getattr(args, "batch", False) else (PROJECT_ROOT / "data" / "queue.json")
+        queue_file = last_batch_file() if getattr(args, "batch", False) else (PROJECT_ROOT / "data" / "queue.json")
         target_queue = QueueManager(queue_file)
 
         if q_action == "add":
@@ -1722,7 +1790,7 @@ def main():
                 return
 
             dispatcher = QueueDispatcher(config=config, queue_manager=target_queue, archive=archive)
-            asyncio.run(dispatcher.run(concurrency=getattr(args, "concurrency", None)))
+            run_download(dispatcher.run(concurrency=getattr(args, "concurrency", None)))
 
         elif q_action == "retry":
             count = target_queue.retry_failed()
@@ -1734,7 +1802,16 @@ def main():
 
         elif q_action == "clear":
             status_f = getattr(args, "status", None)
-            sf = TaskStatus(status_f.lower()) if status_f and status_f.lower() in [s.value for s in TaskStatus] else None
+            sf = None
+            if status_f:
+                valid_statuses = [s.value for s in TaskStatus]
+                if status_f.lower() in valid_statuses:
+                    sf = TaskStatus(status_f.lower())
+                else:
+                    valid_list = ", ".join(valid_statuses)
+                    print(f"\n{Style.tag('❌', 'INVALID STATUS', Style.RED)} Invalid status filter '{status_f}'.")
+                    print(f"  {Style.dim(f'Valid statuses are: {valid_list}')}\n")
+                    return
             count = target_queue.clear(status_filter=sf)
             filter_text = f" ({status_f})" if status_f else ""
             q_label = "batch queue" if getattr(args, "batch", False) else "download queue"
@@ -1769,12 +1846,12 @@ def main():
             config._data.setdefault("general", {})["notifications"] = False
             config._data.setdefault("general", {})["play_sound"] = False
         archive = ArchiveManager(config.archive_db_path)
-        batch_queue = QueueManager(PROJECT_ROOT / "data" / "batch_queue.json")
+        batch_queue = new_batch_queue()
         batch_queue.clear()
         batch_queue.add_batch(extracted_urls, options=opts)
 
         dispatcher = QueueDispatcher(config=config, queue_manager=batch_queue, archive=archive)
-        asyncio.run(dispatcher.run(concurrency=getattr(args, "concurrency", None)))
+        run_download(dispatcher.run(concurrency=getattr(args, "concurrency", None)))
         return
     else:
         parser.print_help()
@@ -1782,6 +1859,7 @@ def main():
 
 if __name__ == "__main__":
     try:
+        signal.signal(signal.SIGINT, _sigint_handler)
         main()
     except KeyboardInterrupt:
-        _sigint_handler()
+        sys.exit(130)

@@ -135,7 +135,8 @@ class EngineUpdater:
                         [sys.executable, "-m", "pip", "install", "-r", str(req_file), "--quiet"],
                         capture_output=True,
                         text=True,
-                        check=False,
+                        check=True,
+                        timeout=180,
                     )
 
                 if rev_before and rev_after and rev_before == rev_after:
@@ -176,7 +177,8 @@ class EngineUpdater:
                     [sys.executable, "-m", "pip", "install", "-r", str(req_file), "--quiet"],
                     capture_output=True,
                     text=True,
-                    check=False,
+                    check=True,
+                    timeout=180,
                 )
 
             rev = subprocess.run(
@@ -259,45 +261,23 @@ class EngineUpdater:
                 cdl_bin = str(local_candidate)
 
         if cdl_bin:
-            try:
-                # Capture version before upgrade attempt
-                res_before = subprocess.run([cdl_bin, "--version"], capture_output=True, text=True, check=False, timeout=10)
-                raw_ver_before = res_before.stdout.strip().splitlines()[-1] if res_before.stdout else ""
-                v_before = raw_ver_before.split()[-1].lstrip("v") if raw_ver_before else ""
-
-                # If uv or uvx tool exists, attempt upgrade of both package variants
-                uv_bin = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv.exe")
-                if Path(uv_bin).exists():
-                    try:
-                        # Try cyberdrop-dl-patched first, then cyberdrop-dl
-                        up_res = subprocess.run([uv_bin, "tool", "upgrade", "cyberdrop-dl-patched"], capture_output=True, text=True, check=False, timeout=60)
-                        if up_res.returncode != 0:
-                            subprocess.run([uv_bin, "tool", "upgrade", "cyberdrop-dl"], capture_output=True, text=True, check=False, timeout=60)
-                    except Exception:
-                        pass
-
-                # If pipx exists, attempt upgrade
-                pipx_bin = shutil.which("pipx")
-                if pipx_bin:
-                    try:
-                        subprocess.run([pipx_bin, "upgrade", "cyberdrop-dl-patched"], capture_output=True, text=True, check=False, timeout=60)
-                        subprocess.run([pipx_bin, "upgrade", "cyberdrop-dl"], capture_output=True, text=True, check=False, timeout=60)
-                    except Exception:
-                        pass
-
-                # Capture version after upgrade attempt
-                res_after = subprocess.run([cdl_bin, "--version"], capture_output=True, text=True, check=False, timeout=10)
-                raw_ver_after = res_after.stdout.strip().splitlines()[-1] if res_after.stdout else ""
-                v_after = raw_ver_after.split()[-1].lstrip("v") if raw_ver_after else ""
-
-                if v_before and v_after and v_before != v_after:
-                    return True, f"Updated ({Style.yellow(f'v{v_before}')} -> {Style.green(f'v{v_after}')}) [{Style.dim(cdl_bin)}]"
-                elif v_after:
-                    return True, f"Up to date ({Style.dim(f'v{v_after}')}) [{Style.dim(cdl_bin)}]"
-                else:
-                    return True, f"Up to date [{Style.dim(cdl_bin)}]"
-            except Exception as e:
-                return True, f"Binary located [{Style.dim(cdl_bin)}]: {e}"
+            commands = []
+            uv_bin = shutil.which('uv')
+            pipx_bin = shutil.which('pipx')
+            if uv_bin:
+                commands.extend([[uv_bin, 'tool', 'upgrade', package] for package in ('cyberdrop-dl-patched', 'cyberdrop-dl')])
+            if pipx_bin:
+                commands.extend([[pipx_bin, 'upgrade', package] for package in ('cyberdrop-dl-patched', 'cyberdrop-dl')])
+            if not commands:
+                return False, 'Standalone binary found; no supported tool manager is available to update it.'
+            for command in commands:
+                try:
+                    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=90)
+                    if result.returncode == 0:
+                        return True, 'Tool manager completed the update successfully'
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+            return False, 'Cyberdrop tool update failed; installed files were left in place.'
 
         # 2. Fallback: check if installed in current Python environment via pip
         if self._get_pkg_version("cyberdrop-dl-patched"):
@@ -329,6 +309,9 @@ class EngineUpdater:
                 timeout=60,
             )
 
+            if pull_res.returncode != 0:
+                return False, 'Git pull failed; see repository status and network access'
+
             rev_after = subprocess.run(
                 [git_bin, "-C", str(self.project_root), "rev-parse", "--short", "HEAD"],
                 capture_output=True,
@@ -345,6 +328,10 @@ class EngineUpdater:
 
     def update_all(self, check_only: bool = False) -> Dict[str, bool]:
         """Runs update check and upgrade routine across all download engines."""
+        if check_only:
+            # Read installed state only; never invoke updater functions in check mode.
+            packages = {'yt-dlp': 'yt-dlp', 'gallery-dl': 'gallery-dl', 'telegram-dl': 'telethon'}
+            return {name: bool(self._get_pkg_version(package)) for name, package in packages.items()}
         print(f"\n{Style.tag('🔄', 'UPDATE', Style.CYAN)} {Style.bold('Checking and updating all download engines...')}\n")
 
         engines = [

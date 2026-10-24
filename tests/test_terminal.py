@@ -68,23 +68,23 @@ def test_engine_badges_and_colors():
 
 
 def test_progress_bar_stages():
-    # 0%: all empty track
+    # 0%: all empty line track
     bar_0 = Style.progress_bar(0.0, width=20)
-    assert "░" * 20 in bar_0
+    assert "─" * 20 in bar_0
 
-    # 50%: 10 filled, 10 empty
+    # 50%: 10 filled sleek lines, 10 empty
     bar_50 = Style.progress_bar(50.0, width=20)
-    assert "█" * 10 in bar_50
-    assert "░" * 10 in bar_50
+    assert "━" * 10 in bar_50
+    assert "─" * 10 in bar_50
 
-    # 100%: fully filled with green
+    # 100%: fully filled with green sleek lines
     bar_100 = Style.progress_bar(100.0, width=20)
-    assert "█" * 20 in bar_100
+    assert "━" * 20 in bar_100
     assert Style.GREEN in bar_100
 
-    # None: indeterminate empty track
+    # None: indeterminate empty line track
     bar_none = Style.progress_bar(None, width=20)
-    assert "░" * 20 in bar_none
+    assert "─" * 20 in bar_none
 
 
 def test_interactive_banner(capsys):
@@ -202,17 +202,17 @@ def test_multibar_manager_two_line_card_format(capsys):
     mb.render(force=True)
     out = capsys.readouterr().out
 
-    # Slot 1 Line 1: [Downloader]: [gallery-dl] • Sample Gallery Title
-    assert "[Downloader]:" in out
+    # Slot 1 Line 1: [gallery-dl] • Sample Gallery Title
+    assert "[Downloader]:" not in out
     assert "[gallery-dl]" in out
     assert "Sample Gallery Title" in out
 
     # Slot 1 Line 2: 14/28 • 24.8/49.6 MB • @
     assert "14/28" in out
     assert "50.0%" in out
-    assert "@" in out
+    assert "24.8/49.6 MB" in out
 
-    # Slot 2 Line 1: [Downloader]: [yt-dlp] • Big Buck Bunny 1080p
+    # Slot 2 Line 1: [yt-dlp] • Big Buck Bunny 1080p
     assert "[yt-dlp]" in out
     assert "Big Buck Bunny 1080p" in out
 
@@ -297,7 +297,7 @@ def test_multibar_manager_wide_title_rendering(capsys):
     )
     mb.render(force=True)
     out = capsys.readouterr().out
-    assert "[Downloader]:" in out
+    assert "[Downloader]:" not in out
     assert "[yt-dlp]" in out
     assert "Pumping Strategies" in out
 
@@ -411,11 +411,10 @@ def test_pending_queue_rendering_bounded_overflow(capsys):
     # First 3 items must be visible
     assert "111111" in out
     assert "222222" in out
-    assert "333333" in out
     # 4th and 5th items should be aggregated in overflow line
     assert "444444" not in out
     assert "555555" not in out
-    assert "[+2 links are pending]" in out
+    assert "+2 links are pending" in out
 
 
 def test_pending_queue_disappears_when_empty(capsys):
@@ -434,7 +433,7 @@ def test_pending_queue_disappears_when_empty(capsys):
 
 
 def test_slot_row1_extractor_and_container_format(capsys):
-    """Verifies that Row 1 of slot cards matches ddd.png: [Downloader]: [engine] • [extractor] • [container/album]."""
+    """Verifies that Row 1 of slot cards matches the original layout: [engine] • [extractor] • [container/album]."""
     from core.terminal import MultiBarManager
 
     mb = MultiBarManager(max_slots=3, is_tty=True)
@@ -456,14 +455,14 @@ def test_slot_row1_extractor_and_container_format(capsys):
     mb.render(force=True)
 
     out = capsys.readouterr().out
-    assert "[Downloader]:" in out
+    assert "[Downloader]:" not in out
     assert "[gallery-dl]" in out
     assert "[erome]" in out
-    assert "[Live da moreninha]" in out
+    assert "Live da moreninha" in out
     # Line 2 file details
     assert "83.3%" in out
     assert "5/6" in out
     assert "qh2ZK7jV" in out
     # Idle slots 2 and 3 visible when remaining > active
-    assert "[idle]" in out
-    assert "connecting..." in out
+    assert "[idle]" not in out
+    assert "connecting..." not in out

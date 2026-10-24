@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 import uuid
+from contextlib import contextmanager
+from dataclasses import asdict
+import logging
+from core.storage import atomic_json_write
 
 from core.models import ArchiveEntry, MediaType
 from core.exceptions import ArchiveDuplicateError
@@ -25,11 +29,36 @@ class ArchiveManager:
             p = project_root / p
         self.db_path = p
         self._init_db()
+        self.retry_pending()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    def defer_entry(self, entry):
+        """Keep a recoverable record if SQLite is temporarily unavailable."""
+        data = asdict(entry)
+        data['media_type'] = entry.media_type.value
+        data['downloaded_at'] = entry.downloaded_at.isoformat()
+        atomic_json_write(self.db_path.parent / 'pending_archive' / f'{uuid.uuid4()}.json', data)
+
+    def retry_pending(self):
+        folder = self.db_path.parent / 'pending_archive'
+        for path in folder.glob('*.json'):
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                data['media_type'] = MediaType(data['media_type'])
+                data['downloaded_at'] = datetime.fromisoformat(data['downloaded_at'])
+                self.add_entry(ArchiveEntry(**data))
+                path.unlink()
+            except (OSError, ValueError, TypeError, sqlite3.Error, ArchiveDuplicateError):
+                logging.getLogger(__name__).warning('A pending download-history record could not be restored; it has been preserved.')
+
+    @contextmanager
+    def _get_connection(self):
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         """Create tables and indexes if they do not exist."""

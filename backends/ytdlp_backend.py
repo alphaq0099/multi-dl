@@ -5,6 +5,7 @@ Ensures total config isolation by passing ignoreconfig=True.
 
 import asyncio
 from pathlib import Path
+import re
 import shutil
 import sys
 import threading
@@ -15,6 +16,7 @@ import yt_dlp
 
 from backends.base import BaseBackend
 from core.exceptions import DownloadFailedError
+from core.workers import run_blocking
 from core.models import ArchiveEntry, DownloadProgress, DownloadTask, MediaType
 from core.pot_manager import POTManager
 from core.terminal import Style
@@ -118,6 +120,14 @@ class YtDlpBackend(BaseBackend):
         with cls._init_lock:
             if not cls._pre_initialized:
                 try:
+                    from core.pot_security import harden_provider, provider_token
+                    bundled = Path(__file__).resolve().parent.parent / 'tools' / 'pot-provider'
+                    if (bundled / 'server' / 'build' / 'main.js').exists():
+                        harden_provider(bundled / 'server')
+                        provider_token()
+                        from yt_dlp.globals import plugin_dirs
+                        if str(bundled) not in plugin_dirs.value:
+                            plugin_dirs.value.insert(0, str(bundled))
                     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as _:
                         pass
                 except Exception:
@@ -250,7 +260,7 @@ class YtDlpBackend(BaseBackend):
 
     async def extract_info(self, url: str) -> Dict[str, Any]:
         """Extract metadata asynchronously without downloading the media."""
-        self._ensure_po_provider_if_needed(url)
+        await run_blocking(self._ensure_po_provider_if_needed, url)
         # Built-in defaults: bypass GVS PO token skips for age-restricted / DASH formats
         extractor_args = {
             "youtube": {
@@ -266,6 +276,8 @@ class YtDlpBackend(BaseBackend):
                     extractor_args[k].update(v)
 
         opts = self._load_config_file_opts()
+        if self.config.get('proxy'):
+            opts['proxy'] = self.config['proxy']
         opts.update({
             "logger": YtDlpStatusLogger(),
             "ignoreconfig": True,  # Prevent reading system %APPDATA%/yt-dlp/config
@@ -291,7 +303,7 @@ class YtDlpBackend(BaseBackend):
                 return ydl.extract_info(url, download=False)
 
         try:
-            return await asyncio.to_thread(_extract)
+            return await run_blocking(_extract)
         except Exception as e:
             err_str = str(e)
             fallback_browser = self.config.get("fallback_browser_cookies")
@@ -305,14 +317,14 @@ class YtDlpBackend(BaseBackend):
                 if fallback_imp:
                     opts["impersonate"] = fallback_imp
                     try:
-                        return await asyncio.to_thread(_extract)
+                        return await run_blocking(_extract)
                     except Exception as waf_retry_err:
                         err_str = f"{str(waf_retry_err)} {err_str}".strip()
 
             if not cookies_browser and fallback_browser and self._is_auth_error(err_str, is_youtube=is_yt):
                 opts["cookiesfrombrowser"] = (fallback_browser,)
                 try:
-                    return await asyncio.to_thread(_extract)
+                    return await run_blocking(_extract)
                 except Exception as retry_err:
                     raise DownloadFailedError(f"yt-dlp metadata extraction failed with fallback cookies: {retry_err}")
             raise DownloadFailedError(f"yt-dlp metadata extraction failed: {e}")
@@ -324,7 +336,8 @@ class YtDlpBackend(BaseBackend):
     ) -> ArchiveEntry:
         """Downloads media using yt-dlp with real-time progress callbacks."""
         quiet = bool(task.options.get("quiet") or progress_callback is not None)
-        self._ensure_po_provider_if_needed(task.url, silent=quiet)
+        await run_blocking(self._ensure_po_provider_if_needed, task.url, silent=quiet)
+        cancel_event = threading.Event()
         out_dir = Path(task.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -344,6 +357,8 @@ class YtDlpBackend(BaseBackend):
         status_logger = YtDlpStatusLogger(quiet=quiet, on_status=_on_logger_status)
 
         def _yt_progress_hook(d: Dict[str, Any]):
+            if cancel_event.is_set():
+                raise DownloadFailedError('Download interrupted')
             nonlocal downloaded_filepath, announced_media
             try:
                 if d.get("status") == "downloading":
@@ -419,7 +434,7 @@ class YtDlpBackend(BaseBackend):
 
         audio_only = bool(task.options.get("audio_only") or task.options.get("extract_audio"))
         video_only = bool(task.options.get("video_only"))
-        res_opt = task.options.get("resolution")
+        res_opt = task.options.get("resolution") or self.config.get("preferred_resolution")
 
         ydl_opts = self._load_config_file_opts()
 
@@ -446,7 +461,7 @@ class YtDlpBackend(BaseBackend):
             "progress_hooks": [_yt_progress_hook],
             "remote_components": ["ejs:github"],  # Automatic JS challenge solver for age-restricted / n-sig
             "extractor_args": extractor_args,
-            "socket_timeout": 20,
+            "socket_timeout": self.config.get('timeout', 30),
             "retries": 4,
             "fragment_retries": 4,
         })
@@ -466,11 +481,13 @@ class YtDlpBackend(BaseBackend):
             ydl_opts["proxy"] = str(proxy)
         # Configure download archive if enabled
         archive_path = task.options.get("download_archive", self.config.get("download_archive", "data/archives/ytdlp_archive.txt"))
+        if task.options.get("force"):
+            ydl_opts["overwrites"] = True
+            ydl_opts['post_overwrites'] = True
+
         if task.options.get("no_archive") or task.options.get("force"):
             ydl_opts.pop("download_archive", None)
             ydl_opts["download_archive"] = None
-        if task.options.get("force"):
-            ydl_opts["overwrites"] = True
         elif archive_path:
             arc_p = Path(archive_path)
             if not arc_p.is_absolute():
@@ -528,6 +545,13 @@ class YtDlpBackend(BaseBackend):
         if imp_target:
             ydl_opts["impersonate"] = imp_target
 
+        ydl_opts['concurrent_fragment_downloads'] = self.config.get('concurrent_fragments', 1)
+        if self.config.get('sponsorblock'):
+            ydl_opts.setdefault('postprocessors', []).extend([
+                {'key': 'SponsorBlock', 'categories': ['sponsor']},
+                {'key': 'ModifyChapters', 'remove_sponsor_segments': ['sponsor']},
+            ])
+
         # Optional Rate Limit
         rate_limit = task.options.get("rate_limit_bytes", self.config.get("rate_limit_bytes"))
         if rate_limit:
@@ -551,7 +575,7 @@ class YtDlpBackend(BaseBackend):
                 return info
 
         try:
-            info = await asyncio.to_thread(_run_download)
+            info = await run_blocking(_run_download, cancel_event=cancel_event)
         except Exception as e:
             err_str = f"{str(e)} {status_logger.last_error}".strip()
             fallback_browser = self.config.get("fallback_browser_cookies")
@@ -569,7 +593,7 @@ class YtDlpBackend(BaseBackend):
                 ydl_opts["writesubtitles"] = False
                 ydl_opts["writeautomaticsub"] = False
                 try:
-                    info = await asyncio.to_thread(_run_download)
+                    info = await run_blocking(_run_download, cancel_event=cancel_event)
                     err_str = None
                 except Exception as sub_retry_err:
                     err_str = f"{str(sub_retry_err)} {status_logger.last_error}".strip()
@@ -588,10 +612,25 @@ class YtDlpBackend(BaseBackend):
                         print(f"\n{Style.tag('🛡️', 'WAF-BYPASS', Style.YELLOW)} Cloudflare/TLS reset detected. Retrying with {Style.bold(target_name)} impersonation...")
                     ydl_opts["impersonate"] = fallback_imp
                     try:
-                        info = await asyncio.to_thread(_run_download)
+                        info = await run_blocking(_run_download, cancel_event=cancel_event)
                         err_str = None
                     except Exception as waf_retry_err:
                         err_str = f"{str(waf_retry_err)} {status_logger.last_error}".strip()
+
+            # 2b. Handle YouTube transient HTTP 403 Forbidden (PO Token warm-up or CDN token refresh race)
+            if err_str and is_yt and ("HTTP Error 403" in err_str or "403: Forbidden" in err_str):
+                retry_403_msg = "RETRY: YouTube HTTP 403 Forbidden. Refreshing stream token..."
+                status_logger.current_status = retry_403_msg
+                if progress_callback:
+                    progress_callback(DownloadProgress(status_message=retry_403_msg, total_files=1, file_index=1))
+                if not quiet:
+                    print(f"\n{Style.tag('🔄', 'RETRY', Style.YELLOW)} YouTube HTTP 403 Forbidden detected. Refreshing token and retrying...")
+                await asyncio.sleep(2.0)
+                try:
+                    info = await run_blocking(_run_download, cancel_event=cancel_event)
+                    err_str = None
+                except Exception as retry_403_err:
+                    err_str = f"{str(retry_403_err)} {status_logger.last_error}".strip()
 
             # 3. Handle actual sign-in / age-restriction requirements with fallback cookies
             if err_str and not user_provided_cookies and fallback_browser and self._is_auth_error(err_str, is_youtube=is_yt):
@@ -603,7 +642,7 @@ class YtDlpBackend(BaseBackend):
                     print(f"\n{Style.tag('⚠️', 'AUTH-REQUIRED', Style.YELLOW)} Media requires sign-in. Automatically retrying with {Style.bold(fallback_browser)} cookies...")
                 ydl_opts["cookiesfrombrowser"] = (fallback_browser,)
                 try:
-                    info = await asyncio.to_thread(_run_download)
+                    info = await run_blocking(_run_download, cancel_event=cancel_event)
                     err_str = None
                 except Exception as retry_err:
                     raise DownloadFailedError(f"yt-dlp download failed with fallback {fallback_browser} cookies: {retry_err}")
@@ -620,13 +659,14 @@ class YtDlpBackend(BaseBackend):
         path_obj = Path(actual_path) if actual_path else None
 
         # If path points to an intermediate fragment/stream, check if the merged .mp4 exists
-        if path_obj and (not path_obj.exists() or ".f" in path_obj.name):
+        if path_obj and (not path_obj.exists() or re.search(r'\.f[a-zA-Z0-9_-]+$', path_obj.stem)):
             target_ext = ydl_opts.get("merge_output_format", "mp4")
-            # Try to match expected final name
-            clean_name = path_obj.stem.split(".f")[0] + f".{target_ext}"
-            candidate = out_dir / clean_name
+            clean_stem = re.sub(r'\.f[a-zA-Z0-9_-]+$', '', path_obj.stem)
+            candidate = out_dir / f"{clean_stem}.{target_ext}"
             if candidate.exists():
                 path_obj = candidate
+            elif (out_dir / f"{clean_stem}{path_obj.suffix}").exists():
+                path_obj = out_dir / f"{clean_stem}{path_obj.suffix}"
 
         if not path_obj or not path_obj.exists() or not path_obj.is_file():
             if status_logger.already_archived:

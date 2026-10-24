@@ -13,6 +13,7 @@ import re
 import shutil
 import sys
 import time
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import urllib.parse
 import uuid
@@ -23,6 +24,11 @@ from dotenv import load_dotenv
 from backends.base import BaseBackend
 from core.exceptions import AuthenticationError, DownloadFailedError, EngineNotFoundError
 from core.models import ArchiveEntry, DownloadProgress, DownloadTask, MediaType
+from core.files import safe_name, contained_path
+from core.storage import file_lock, atomic_json_write
+from core.exceptions import ConfigError
+from core.workers import run_blocking
+from core.archive import ArchiveManager
 from core.terminal import Style, format_bytes
 
 APP_ID = "250528"
@@ -54,7 +60,8 @@ ERROR_MESSAGES = {
     105: "Invalid share link format.",
     112: "Session expired or cookie invalid. Please re-authenticate.",
     118: "Download quota exceeded for this file.",
-    400210: "jsToken missing or invalid. Auto-refreshing...",
+    400141: "TeraBox security verification required ('need verify'). A valid ndus cookie is required.",
+    400210: "TeraBox security verification required ('need verify_v2'). Fresh ndus cookie or verification required.",
     4000023: "jsToken expired. Auto-refreshing...",
 }
 
@@ -67,8 +74,7 @@ def _get_safe_filename(name: Optional[str]) -> str:
     if not name:
         return "unnamed_file"
     # Remove invalid Windows filesystem characters: < > : " / \ | ? *
-    clean = re.sub(r'[<>:"/\\|?*]', '_', name).strip()
-    return clean or "unnamed_file"
+    return safe_name(name)
 
 
 def _detect_media_type(filename: str) -> MediaType:
@@ -255,6 +261,8 @@ class TeraboxDlBackend(BaseBackend):
         "www.terabox.com",
         "1024tera.com",
         "www.1024tera.com",
+        "1024terabox.com",
+        "www.1024terabox.com",
         "teraboxlink.com",
         "www.teraboxlink.com",
         "freeterabox.com",
@@ -267,6 +275,10 @@ class TeraboxDlBackend(BaseBackend):
         "www.4funbox.com",
         "teraboxapp.com",
         "www.teraboxapp.com",
+        "tibibox.com",
+        "www.tibibox.com",
+        "momobox.com",
+        "www.momobox.com",
     ]
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -287,7 +299,7 @@ class TeraboxDlBackend(BaseBackend):
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     for k, v in data.items():
-                        if not k.startswith("//") and k not in self.config:
+                        if not k.startswith("//") and (k not in self.config or self.config[k] in (None, "")):
                             self.config[k] = v
             except Exception:
                 pass
@@ -295,11 +307,11 @@ class TeraboxDlBackend(BaseBackend):
     def can_handle(self, url: str) -> bool:
         """Returns True if the URL targets any supported TeraBox domain or contains surl=."""
         url_lower = url.lower()
-        if "surl=" in url_lower:
-            return True
         try:
             domain = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
-            return any(domain == d or domain.endswith("." + d) for d in self.supported_domains)
+            if any(domain == d or domain.endswith("." + d) for d in self.supported_domains):
+                return True
+            return False
         except Exception:
             return False
 
@@ -345,41 +357,46 @@ class TeraboxDlBackend(BaseBackend):
         custom_env = self.config.get("env_file")
         candidate_envs = [
             Path(custom_env) if custom_env else None,
+            Path(__file__).resolve().parent.parent / ".env",
             Path.home() / "Terabox-dl" / ".env",
             Path.home() / "terabox-dl" / ".env",
-            Path(__file__).resolve().parent.parent / ".env",
         ]
         for p in candidate_envs:
             if p and p.exists():
-                load_dotenv(p)
-                val = os.getenv("TERABOX_NDUS")
-                if val:
-                    return val.strip()
+                try:
+                    load_dotenv(p)
+                    val = os.getenv("TERABOX_NDUS") or os.getenv("TERABOX_NDUS_COOKIE")
+                    if val:
+                        return val.strip()
+                except Exception:
+                    pass
 
         return ""
 
     def _save_modular_config(self) -> None:
-        """Persists updated configuration back to configs/terabox-dl.json."""
-        cfg_path_str = self.config.get("config_file", "configs/terabox-dl.json")
-        cfg_path = Path(cfg_path_str)
-        if not cfg_path.is_absolute():
-            project_root = Path(__file__).resolve().parent.parent
-            cfg_path = project_root / cfg_path
-
-        try:
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            current_data: Dict[str, Any] = {}
-            if cfg_path.exists():
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        current_data = json.load(f)
-                except Exception:
-                    pass
-            current_data["ndus_cookie"] = self.config.get("ndus_cookie", "")
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(current_data, f, indent=2)
-        except Exception:
-            pass
+        """Save credentials atomically without rewriting an unrelated .env file."""
+        project_root = Path(__file__).resolve().parent.parent
+        path = Path(self.config.get('config_file', 'configs/terabox-dl.json'))
+        if not path.is_absolute():
+            path = project_root / path
+        with file_lock(path):
+            try:
+                current = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+                if not isinstance(current, dict):
+                    raise ValueError('Expected a JSON object')
+                for key in ('ndus_cookie',):
+                    if key in self.config:
+                        current[key] = self.config[key]
+                atomic_json_write(path, current)
+            except (OSError, ValueError, TypeError) as exc:
+                raise ConfigError('Could not save terabox credentials; existing configuration was preserved') from exc
+        if path.resolve() == (project_root / 'configs' / 'terabox-dl.json').resolve():
+            # The application master store has precedence over .env fallbacks.
+            from core.config import ConfigManager
+            master = ConfigManager()
+            for key in ('ndus_cookie',):
+                if key in self.config:
+                    master.set('terabox_dl', key, self.config[key])
 
     def _prompt_ndus_cookie(self, reason: str = "") -> str:
         """Interactively prompts the user for their TeraBox NDUS cookie."""
@@ -410,31 +427,90 @@ class TeraboxDlBackend(BaseBackend):
         print(f"\n{Style.tag('💾', 'SAVED', Style.GREEN)} Cookie saved to {Style.path('configs/terabox-dl.json')}\n")
         return val
 
-    def _create_session(self, ndus_cookie: str) -> requests.Session:
-        """Initializes a configured requests Session with cookies and headers."""
-        session = requests.Session()
+    @classmethod
+    def get_base_url(cls, target_url: str) -> str:
+        """
+        Dynamically resolves active TeraBox API base host from the target link.
+        If the target domain is an unblocked mirror (e.g. 1024terabox.com or 1024tera.com),
+        uses that domain as the primary API base to bypass ISP blocks on terabox.com.
+        """
+        try:
+            parsed = urllib.parse.urlparse(target_url)
+            if parsed.netloc:
+                domain = (parsed.hostname or '').lower()
+                if any(domain == host or domain.endswith('.' + host) for host in cls.supported_domains):
+                    return f'https://{domain}'
+        except Exception:
+            pass
+        return BASE_URL
+
+    def _create_session(self, ndus_cookie: str) -> Any:
+        """Initializes a configured Session with cookies and headers."""
+        try:
+            from curl_cffi import requests as cffi_requests
+            session = cffi_requests.Session(impersonate="chrome")
+        except Exception:
+            session = requests.Session()
+
         session.headers.update(TERABOX_HEADERS)
+        proxy = self.config.get('proxy')
+        if proxy:
+            session.proxies.update({'http': proxy, 'https': proxy})
         custom_ua = self.config.get("user_agent")
         if custom_ua:
             session.headers["User-Agent"] = custom_ua
 
         if ndus_cookie:
-            for domain in [".terabox.com", ".1024tera.com", ".teraboxlink.com", ".freeterabox.com"]:
-                session.cookies.set("ndus", ndus_cookie, domain=domain)
+            for domain in [
+                ".terabox.com",
+                ".1024tera.com",
+                ".1024terabox.com",
+                ".teraboxlink.com",
+                ".freeterabox.com",
+                ".mirrobox.com",
+                ".nephobox.com",
+                ".4funbox.com",
+                ".teraboxapp.com",
+                ".tibibox.com",
+                ".momobox.com",
+            ]:
+                try:
+                    session.cookies.set("ndus", ndus_cookie, domain=domain)
+                except Exception:
+                    pass
         return session
 
-    def _fetch_js_token(self, session: requests.Session, target_url: str) -> Optional[str]:
+    def _fetch_js_token(self, session: Any, target_url: str) -> Optional[str]:
         """Scrapes the dynamic jsToken required for TeraBox signature requests."""
         if self._cached_js_token:
             return self._cached_js_token
 
-        urls_to_try = [target_url, BASE_URL]
+        base_url = self.get_base_url(target_url)
+        short_key = self.extract_short_key(target_url)
+        urls_to_try: List[str] = []
+        if short_key:
+            canonical_url = f"{BASE_URL}/s/{short_key}"
+            urls_to_try.append(canonical_url)
+        if target_url not in urls_to_try:
+            urls_to_try.append(target_url)
+        if base_url != target_url and base_url not in urls_to_try:
+            urls_to_try.append(base_url)
+        if "1024tera.com" not in base_url and "https://www.1024tera.com" not in urls_to_try:
+            urls_to_try.append("https://www.1024tera.com")
+        if BASE_URL not in urls_to_try:
+            urls_to_try.append(BASE_URL)
+
         timeout = int(self.config.get("timeout", 30))
 
         for u in urls_to_try:
             try:
                 resp = session.get(u, timeout=timeout)
                 html = resp.text
+
+                # Check if TeraBox responded with a verification / CAPTCHA challenge
+                if html.strip().startswith("{") and ("400141" in html or "need verify" in html or "verify_v2" in html):
+                    self._last_terabox_verify_required = True
+                    return None
 
                 # Primary pattern (encoded backticks)
                 start_marker = '`function%20fn%28a%29%7Bwindow.jsToken%20%3D%20a%7D%3Bfn%28%22'
@@ -477,10 +553,12 @@ class TeraboxDlBackend(BaseBackend):
 
         return None
 
-    def _get_share_info(self, session: requests.Session, short_key: str, target_url: str) -> Dict[str, Any]:
-        """Resolves share metadata via /api/shorturlinfo."""
+    def _get_share_info(self, session: Any, short_key: str, target_url: str) -> Dict[str, Any]:
+        """Resolves share metadata via /api/shorturlinfo across reachable mirrors."""
         app_id = self.config.get("app_id", APP_ID)
         timeout = int(self.config.get("timeout", 30))
+        base_url = self.get_base_url(target_url)
+
         params = {
             "shorturl": short_key,
             "root": "1",
@@ -494,65 +572,106 @@ class TeraboxDlBackend(BaseBackend):
         if js_token:
             params["jsToken"] = js_token
 
-        url = f"{BASE_URL}/api/shorturlinfo"
+        # Candidate API base hosts: canonical BASE_URL first (most stable), then active mirror, then 1024tera
+        candidate_bases = [BASE_URL]
+        if base_url not in candidate_bases:
+            candidate_bases.append(base_url)
+        if "https://www.1024tera.com" not in candidate_bases:
+            candidate_bases.append("https://www.1024tera.com")
 
-        for attempt in range(1, 4):
-            try:
-                resp = session.get(url, params=params, timeout=timeout)
-                data = resp.json()
-
-                if data.get("errno") in (400210, 4000023):
-                    # Refresh token and retry
-                    self._cached_js_token = None
-                    js_token = self._fetch_js_token(session, target_url)
-                    if js_token:
-                        params["jsToken"] = js_token
+        last_error = None
+        for base in candidate_bases:
+            url = f"{base}/api/shorturlinfo"
+            for attempt in range(1, 3):
+                try:
                     resp = session.get(url, params=params, timeout=timeout)
                     data = resp.json()
 
-                errno = data.get("errno", 0)
-                if errno != 0:
-                    err_msg = _get_error_message(errno)
-                    if errno in (-20, 12, 112):
-                        if Style.is_interactive():
-                            new_cookie = self._prompt_ndus_cookie(reason=err_msg)
-                            for domain in [".terabox.com", ".1024tera.com", ".teraboxlink.com", ".freeterabox.com"]:
-                                session.cookies.set("ndus", new_cookie, domain=domain)
-                            self._cached_js_token = None
-                            js_token = self._fetch_js_token(session, target_url)
-                            if js_token:
-                                params["jsToken"] = js_token
-                            continue
-                        raise AuthenticationError(f"{err_msg} (Provide a valid ndus cookie)")
-                    raise DownloadFailedError(err_msg)
+                    errmsg = str(data.get("errmsg", "")).lower()
+                    if data.get("errno") in (400210, 4000023):
+                        # Pure jsToken expiration: refresh and retry once
+                        self._cached_js_token = None
+                        js_token = self._fetch_js_token(session, target_url)
+                        if js_token:
+                            params["jsToken"] = js_token
+                        resp = session.get(url, params=params, timeout=timeout)
+                        data = resp.json()
+                        errmsg = str(data.get("errmsg", "")).lower()
 
-                return {
-                    "share_id": data.get("shareid"),
-                    "uk": data.get("uk"),
-                    "sign": data.get("sign"),
-                    "timestamp": data.get("timestamp"),
-                    "randsk": data.get("randsk"),
-                    "title": data.get("title", "Shared Files"),
-                    "file_list": data.get("list", []),
-                }
-            except (AuthenticationError, DownloadFailedError):
-                raise
-            except Exception as e:
-                if attempt == 3:
-                    raise DownloadFailedError(f"Failed to resolve TeraBox share info: {e}")
-                time.sleep(1)
+                    errno = data.get("errno", 0)
+                    if errno != 0:
+                        err_msg = _get_error_message(errno)
+                        is_verify = (
+                            errno == 400141
+                            or "need verify" in errmsg
+                            or "verify_v2" in errmsg
+                            or "need verify" in err_msg.lower()
+                            or getattr(self, "_last_terabox_verify_required", False)
+                        )
+                        if errno in (-20, 12, 112) or is_verify:
+                            if is_verify:
+                                err_msg = "TeraBox security verification required ('need verify_v2'). Your ndus cookie has expired or requires browser re-verification."
+                            last_error = AuthenticationError(f"{err_msg} (Configure your ndus cookie via 'multi-dl auth terabox' or GUI Settings)")
+                        else:
+                            last_error = DownloadFailedError(err_msg)
+                        # Break out to try the next candidate mirror base
+                        break
 
+                    return {
+                        "share_id": data.get("shareid"),
+                        "uk": data.get("uk"),
+                        "sign": data.get("sign"),
+                        "timestamp": data.get("timestamp"),
+                        "randsk": data.get("randsk"),
+                        "title": data.get("title", "Shared Files"),
+                        "file_list": data.get("list", []),
+                        "api_base": base,
+                    }
+                except (AuthenticationError, DownloadFailedError) as e:
+                    last_error = e
+                    break
+                except Exception as e:
+                    last_error = e
+                    # If this host had connection reset / blocked, try next mirror
+                    err_s = str(e)
+                    if "ConnectionResetError" in err_s or "10054" in err_s or "Connection aborted" in err_s:
+                        break
+                    time.sleep(1)
+
+        # If all candidate bases failed and authentication error occurred (prompt once per execution):
+        if isinstance(last_error, AuthenticationError) and Style.is_interactive() and not getattr(self, "_has_prompted_ndus", False):
+            self._has_prompted_ndus = True
+            new_cookie = self._prompt_ndus_cookie(reason=str(last_error))
+            for domain in [
+                ".terabox.com", ".1024tera.com", ".1024terabox.com",
+                ".teraboxlink.com", ".freeterabox.com", ".mirrobox.com",
+                ".nephobox.com", ".4funbox.com", ".teraboxapp.com",
+                ".tibibox.com", ".momobox.com",
+            ]:
+                try:
+                    session.cookies.set("ndus", new_cookie, domain=domain)
+                except Exception:
+                    pass
+            self._cached_js_token = None
+            self._last_terabox_verify_required = False
+            return self._get_share_info(session, short_key, target_url)
+
+        if last_error:
+            if isinstance(last_error, (AuthenticationError, DownloadFailedError)):
+                raise last_error
+            raise DownloadFailedError(f"Failed to resolve TeraBox share info: {last_error}")
         raise DownloadFailedError("Failed to resolve TeraBox share info after retries.")
 
     def _get_folder_contents(
         self,
-        session: requests.Session,
+        session: Any,
         share_id: Any,
         uk: Any,
         sign: Any,
         timestamp: Any,
         directory: str,
         target_url: str,
+        api_base: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Recursively lists all files in a folder directory."""
         app_id = self.config.get("app_id", APP_ID)
@@ -560,6 +679,7 @@ class TeraboxDlBackend(BaseBackend):
         all_items: List[Dict[str, Any]] = []
         page = 1
         limit = 100
+        base = api_base or self.get_base_url(target_url)
 
         while True:
             params = {
@@ -580,7 +700,7 @@ class TeraboxDlBackend(BaseBackend):
             if self._cached_js_token:
                 params["jsToken"] = self._cached_js_token
 
-            url = f"{BASE_URL}/share/list"
+            url = f"{base}/share/list"
             try:
                 resp = session.get(url, params=params, timeout=timeout)
                 data = resp.json()
@@ -611,43 +731,55 @@ class TeraboxDlBackend(BaseBackend):
 
     def _get_download_link(
         self,
-        session: requests.Session,
+        session: Any,
         fs_id: Any,
         share_id: Any,
         uk: Any,
         sign: Any,
         timestamp: Any,
         randsk: Any,
+        api_base: Optional[str] = None,
     ) -> Optional[str]:
-        """Retrieves direct CDN download URL via /api/sharedownload."""
         app_id = self.config.get("app_id", APP_ID)
         timeout = int(self.config.get("timeout", 30))
-
         decoded_randsk = urllib.parse.unquote(randsk) if '%' in str(randsk) else str(randsk)
         extra = f'{{"sekey":"{decoded_randsk}"}}'
         extra_escaped = urllib.parse.quote(extra)
         data = f"encrypt=0&extra={extra_escaped}&fid_list=[{fs_id}]&primaryid={share_id}&uk={uk}&product=share&type=nolimit"
-        uri = f"{BASE_URL}/api/sharedownload?app_id={app_id}&channel=chunlei&clienttype=12&sign={sign}&timestamp={timestamp}&web=1"
 
         post_headers = session.headers.copy()
         post_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-        for _ in range(3):
-            try:
-                resp = session.post(uri, headers=post_headers, data=data, timeout=timeout)
-                resp_data = resp.json()
-                if resp_data.get("errno") == 0 and resp_data.get("list"):
-                    return resp_data["list"][0].get("dlink")
-                if resp_data.get("errno") in (-20, 12, 112):
-                    if Style.is_interactive():
-                        err_msg = _get_error_message(resp_data.get("errno"))
-                        new_cookie = self._prompt_ndus_cookie(reason=err_msg)
-                        for domain in [".terabox.com", ".1024tera.com", ".teraboxlink.com", ".freeterabox.com"]:
-                            session.cookies.set("ndus", new_cookie, domain=domain)
-                        continue
-                time.sleep(1)
-            except Exception:
-                time.sleep(1)
+        candidate_bases = [BASE_URL]
+        if api_base and api_base not in candidate_bases:
+            candidate_bases.append(api_base)
+
+        for base in candidate_bases:
+            uri = f"{base}/api/sharedownload?app_id={app_id}&channel=chunlei&clienttype=12&sign={sign}&timestamp={timestamp}&web=1"
+            for _ in range(3):
+                try:
+                    resp = session.post(uri, headers=post_headers, data=data, timeout=timeout)
+                    resp_data = resp.json()
+                    if resp_data.get("errno") == 0 and resp_data.get("list"):
+                        return resp_data["list"][0].get("dlink")
+                    if resp_data.get("errno") in (-20, 12, 112):
+                        if Style.is_interactive():
+                            err_msg = _get_error_message(resp_data.get("errno"))
+                            new_cookie = self._prompt_ndus_cookie(reason=err_msg)
+                            for domain in [
+                                ".terabox.com", ".1024tera.com", ".1024terabox.com",
+                                ".teraboxlink.com", ".freeterabox.com", ".mirrobox.com",
+                                ".nephobox.com", ".4funbox.com", ".teraboxapp.com",
+                                ".tibibox.com", ".momobox.com",
+                            ]:
+                                try:
+                                    session.cookies.set("ndus", new_cookie, domain=domain)
+                                except Exception:
+                                    pass
+                            continue
+                    time.sleep(1)
+                except Exception:
+                    time.sleep(1)
 
         return None
 
@@ -675,6 +807,8 @@ class TeraboxDlBackend(BaseBackend):
         quiet = bool(task.options.get("quiet") or progress_callback is not None)
 
         short_key = self.extract_short_key(task.url)
+        out_dir = contained_path(out_dir, safe_name(short_key))
+        out_dir.mkdir(parents=True, exist_ok=True)
         ndus_cookie = self._resolve_ndus_cookie(task.options)
         if not ndus_cookie and not quiet:
             print(f"\n{Style.tag('⚠️', 'AUTH', Style.YELLOW)} {Style.yellow('No ndus cookie provided.')}")
@@ -683,6 +817,9 @@ class TeraboxDlBackend(BaseBackend):
             print(f"  {Style.dim('3. Or pass --ndus <cookie> on CLI')}\n")
 
         session = self._create_session(ndus_cookie)
+        if task.options.get('proxy'):
+            session.proxies.update({'http': task.options['proxy'], 'https': task.options['proxy']})
+        cancel_event = threading.Event()
 
         def _resolve_pipeline() -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
             info = self._get_share_info(session, short_key, task.url)
@@ -707,6 +844,7 @@ class TeraboxDlBackend(BaseBackend):
                             info["timestamp"],
                             folder_path,
                             task.url,
+                            api_base=info.get("api_base"),
                         )
                         _walk(sub_items, sub_path)
                     else:
@@ -723,8 +861,21 @@ class TeraboxDlBackend(BaseBackend):
             _walk(file_list, "")
             return info, queue
 
-        info, queue = await asyncio.to_thread(_resolve_pipeline)
+        try:
+            info, queue = await run_blocking(_resolve_pipeline, cancel_event=cancel_event)
+        except BaseException:
+            if hasattr(session, 'close'):
+                session.close()
+            raise
+        audio_only = bool(task.options.get('audio_only') or task.options.get('extract_audio'))
+        video_only = bool(task.options.get('video_only'))
+        images_only = bool(task.options.get('images_only'))
+        if audio_only or video_only or images_only:
+            wanted = MediaType.AUDIO if audio_only else (MediaType.VIDEO if video_only else MediaType.IMAGE)
+            queue = [entry for entry in queue if _detect_media_type(entry['item'].get('server_filename', '')) == wanted]
         if not queue:
+            if hasattr(session, 'close'):
+                session.close()
             raise DownloadFailedError("No downloadable files found in this TeraBox share.")
 
         share_title = info.get("title", "Shared Files")
@@ -746,6 +897,12 @@ class TeraboxDlBackend(BaseBackend):
         resume_enabled = bool(self.config.get("resume", True))
         timeout = int(self.config.get("timeout", 30))
 
+        download_errors: List[str] = []
+        if max_retries <= 0 or chunk_size <= 0 or timeout <= 0:
+            if hasattr(session, 'close'):
+                session.close()
+            raise DownloadFailedError('TeraBox retries, chunk size, and timeout must be positive')
+
         def _download_all() -> None:
             for idx, q_entry in enumerate(queue, 1):
                 item = q_entry["item"]
@@ -755,9 +912,15 @@ class TeraboxDlBackend(BaseBackend):
                 file_size = int(item.get("size", 0))
                 fs_id = item.get("fs_id")
 
-                target_folder = out_dir / rel_dir if rel_dir else out_dir
+                if cancel_event.is_set():
+                    raise DownloadFailedError('Download interrupted')
+                target_folder = contained_path(out_dir, rel_dir)
                 target_folder.mkdir(parents=True, exist_ok=True)
-                dest_path = target_folder / filename
+                # Stable file identity prevents collisions after filename sanitization.
+                stem, suffix = Path(filename).stem, Path(filename).suffix
+                filename = f'{stem} [{safe_name(fs_id or idx)}]{suffix}'
+                dest_path = contained_path(target_folder, filename)
+                part_path = dest_path.with_name(dest_path.name + '.part')
 
                 # 1. Resolve CDN link
                 dlink = item.get("dlink")
@@ -770,15 +933,17 @@ class TeraboxDlBackend(BaseBackend):
                         q_entry["sign"],
                         q_entry["timestamp"],
                         q_entry["randsk"],
+                        api_base=info.get("api_base"),
                     )
 
                 if not dlink:
+                    download_errors.append(f"{filename}: Failed to resolve direct download link")
                     if batch_tracker:
                         batch_tracker.finish_file(filename, 0, skipped=True)
                     continue
 
                 # 2. Check existing / collision
-                if dest_path.exists():
+                if dest_path.exists() and not task.options.get('force'):
                     exist_sz = dest_path.stat().st_size
                     if exist_sz == file_size and file_size > 0:
                         downloaded_paths.append(dest_path)
@@ -791,14 +956,10 @@ class TeraboxDlBackend(BaseBackend):
                 for attempt in range(1, max_retries + 1):
                     try:
                         resume_pos = 0
-                        if resume_enabled and dest_path.exists():
-                            resume_pos = dest_path.stat().st_size
+                        if resume_enabled and part_path.exists() and not task.options.get('force'):
+                            resume_pos = part_path.stat().st_size
                             if resume_pos >= file_size and file_size > 0:
-                                downloaded_paths.append(dest_path)
-                                if batch_tracker:
-                                    batch_tracker.finish_file(filename, file_size, skipped=True)
-                                success = True
-                                break
+                                resume_pos = 0
 
                         req_headers = session.headers.copy()
                         if resume_pos > 0:
@@ -809,16 +970,24 @@ class TeraboxDlBackend(BaseBackend):
                         last_bytes = resume_pos
                         current_speed = 0.0
 
-                        with session.get(dlink, headers=req_headers, stream=True, timeout=timeout) as resp:
+                        resp = session.get(dlink, headers=req_headers, stream=True, timeout=timeout)
+                        try:
                             if resp.status_code not in (200, 206):
                                 resp.raise_for_status()
 
                             is_append = resp.status_code == 206
-                            mode = "ab" if is_append else "wb"
+                            if is_append:
+                                content_range = resp.headers.get('Content-Range', '')
+                                match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', content_range)
+                                if not match or int(match[1]) != resume_pos or int(match[2]) < int(match[1]) or (file_size and int(match[3]) != file_size):
+                                    raise DownloadFailedError('Server returned an invalid Content-Range')
+                            mode = "ab" if is_append and resume_pos > 0 else "wb"
                             downloaded_now = resume_pos if is_append else 0
 
-                            with open(dest_path, mode) as f:
+                            with open(part_path, mode) as f:
                                 for chunk in resp.iter_content(chunk_size=chunk_size):
+                                    if cancel_event.is_set():
+                                        raise DownloadFailedError('Download interrupted')
                                     if not chunk:
                                         continue
                                     f.write(chunk)
@@ -859,27 +1028,45 @@ class TeraboxDlBackend(BaseBackend):
                                             )
                                             prog.update_percent()
                                             progress_callback(prog)
+                        finally:
+                            if hasattr(resp, "close"):
+                                try:
+                                    resp.close()
+                                except Exception:
+                                    pass
 
+                        actual_size = part_path.stat().st_size
+                        if file_size > 0 and actual_size != file_size:
+                            raise DownloadFailedError(f'Incomplete transfer: expected {file_size} bytes, received {actual_size}')
+                        os.replace(part_path, dest_path)
                         downloaded_paths.append(dest_path)
                         if batch_tracker:
                             batch_tracker.finish_file(filename, file_size)
                         success = True
                         break
 
-                    except Exception:
+                    except Exception as err:
                         if attempt == max_retries:
+                            download_errors.append(f"{filename}: {err}")
                             if batch_tracker:
                                 batch_tracker.finish_file(filename, 0, skipped=True)
                         else:
                             time.sleep(1)
 
-        await asyncio.to_thread(_download_all)
+        try:
+            await run_blocking(_download_all, cancel_event=cancel_event)
+        finally:
+            if hasattr(session, 'close'):
+                session.close()
 
         if batch_tracker:
             batch_tracker.finish()
 
         if not downloaded_paths:
-            raise DownloadFailedError("Failed to download any files from TeraBox.")
+            err_msg = "; ".join(download_errors) if download_errors else "No downloadable files could be retrieved."
+            raise DownloadFailedError(f"Failed to download any files from TeraBox: {err_msg}")
+        if download_errors:
+            raise DownloadFailedError(f'Partial TeraBox download ({len(downloaded_paths)}/{total_files} files): ' + '; '.join(download_errors))
 
         # Determine primary file or folder path
         primary_path = downloaded_paths[0] if len(downloaded_paths) == 1 else out_dir
@@ -887,18 +1074,7 @@ class TeraboxDlBackend(BaseBackend):
         total_size = sum(p.stat().st_size for p in downloaded_paths if p.exists())
         media_type = _detect_media_type(primary_path.name) if len(downloaded_paths) == 1 else MediaType.UNKNOWN
 
-        # Calculate SHA256 of primary file (or first downloaded file)
-        file_hash = None
-        first_file = downloaded_paths[0]
-        if first_file.exists():
-            try:
-                hasher = hashlib.sha256()
-                with open(first_file, "rb") as f:
-                    for chunk in iter(lambda: f.read(65536), b""):
-                        hasher.update(chunk)
-                file_hash = hasher.hexdigest()
-            except Exception:
-                pass
+        file_hash = await run_blocking(ArchiveManager.calculate_file_hash, primary_path)
 
         return ArchiveEntry(
             id=str(uuid.uuid4()),

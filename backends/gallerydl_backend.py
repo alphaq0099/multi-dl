@@ -4,6 +4,7 @@ Ensures config isolation by resetting memory config state and loading from modul
 """
 
 import asyncio
+import copy
 import logging
 import os
 from pathlib import Path
@@ -22,6 +23,8 @@ from backends.base import BaseBackend
 from core.exceptions import DownloadFailedError
 from core.models import ArchiveEntry, DownloadProgress, DownloadTask, MediaType
 from core.terminal import Style, format_bytes
+from core.workers import run_blocking
+from core.gallery_process import run_gallery_process
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -84,11 +87,22 @@ class _GalleryDlBatchTracker:
         self.current_speed: Optional[float] = None
 
         self.title_announced: bool = False
+        self.phase = 'resolving'
         self._lines_printed: int = 0
         self._is_tty: bool = sys.stdout.isatty() if hasattr(sys.stdout, "isatty") else True
 
+    def _emit(self, progress):
+        progress.phase = self.phase
+        progress.file_name = self.current_filename or None
+        progress.file_downloaded_bytes = self.current_downloaded
+        progress.file_total_bytes = self.current_total
+        progress.completed_files = self.completed_count
+        if self.progress_callback:
+            self.progress_callback(progress)
+
     def on_warning(self, warn_msg: str) -> None:
         """Pushes a connection warning/issue directly into the live verbose tag without disturbing stdout."""
+        self.phase = 'waiting'
         if self.progress_callback:
             tot_b = sum(self._file_bytes.values())
             pct = ((self.completed_count / self.total_files) * 100.0) if self.total_files else None
@@ -107,7 +121,7 @@ class _GalleryDlBatchTracker:
                 extractor=self.extractor_name,
                 container_title=self.album_title,
             )
-            self.progress_callback(prog)
+            self._emit(prog)
 
     @staticmethod
     def _visible_len(s: str) -> int:
@@ -170,7 +184,7 @@ class _GalleryDlBatchTracker:
 
         if self.progress_callback:
             msg = f"METADATA: Detected {self.total_files} files" if self.total_files else "METADATA: Fetching album metadata"
-            self.progress_callback(
+            self._emit(
                 DownloadProgress(
                     current_file=self.album_title or "Gallery",
                     total_files=self.total_files,
@@ -224,7 +238,7 @@ class _GalleryDlBatchTracker:
                 self.extractor_name = str(cat).lower()
 
         if self.progress_callback and not self.completed_count:
-            self.progress_callback(
+            self._emit(
                 DownloadProgress(
                     current_file=self.album_title or "Gallery",
                     total_files=self.total_files,
@@ -241,14 +255,21 @@ class _GalleryDlBatchTracker:
         self.current_filename = p.name
         self.current_downloaded = 0
         self.current_total = None
+        self.current_speed = None
+        self.phase = 'downloading'
         # Derive album title from parent folder if not set or generic
         if not self.album_title and p.parent.name and p.parent.name.lower() not in ("downloads", "gallery-dl", "bunkr", "misc", "tmp", ""):
             self.album_title = p.parent.name
+        self._emit(DownloadProgress(downloaded_bytes=sum(self._file_bytes.values()),
+                                    current_file=self.album_title or p.name, total_files=self.total_files,
+                                    file_index=self.completed_count, status_message='Downloading',
+                                    extractor=self.extractor_name, container_title=self.album_title))
         if not self.quiet:
             self._render()
 
     def progress(self, bytes_total: Optional[int], bytes_downloaded: int, bytes_per_second: int) -> None:
         """Called with live byte stream progress for the current file."""
+        self.phase = 'downloading'
         self.current_total = bytes_total
         self.current_downloaded = bytes_downloaded
         if bytes_per_second:
@@ -271,7 +292,7 @@ class _GalleryDlBatchTracker:
                 extractor=self.extractor_name,
                 container_title=self.album_title,
             )
-            self.progress_callback(prog)
+            self._emit(prog)
 
         if not self.quiet:
             self._render()
@@ -288,7 +309,8 @@ class _GalleryDlBatchTracker:
             self._file_bytes[p.name] = self.current_total
 
         is_completed = bool(self.total_files and self.completed_count >= self.total_files)
-        status_msg = "Finalizing archive..." if is_completed else p.name
+        self.phase = 'processing' if is_completed else 'resolving'
+        status_msg = "Finalizing archive..." if is_completed else 'Fetching next file'
         reported_speed = None if is_completed else self.current_speed
 
         if self.progress_callback:
@@ -306,7 +328,7 @@ class _GalleryDlBatchTracker:
                 extractor=self.extractor_name,
                 container_title=self.album_title,
             )
-            self.progress_callback(prog)
+            self._emit(prog)
 
         if not self.quiet:
             self._render()
@@ -322,6 +344,7 @@ class _GalleryDlBatchTracker:
             self._file_bytes[p.name] = p.stat().st_size
 
         is_completed = bool(self.total_files and self.completed_count >= self.total_files)
+        self.phase = 'processing' if is_completed else 'resolving'
         status_msg = "Finalizing archive..." if is_completed else f"Skipped: {p.name}"
         reported_speed = None if is_completed else self.current_speed
 
@@ -338,7 +361,7 @@ class _GalleryDlBatchTracker:
                 file_index=self.completed_count,
                 status_message=status_msg,
             )
-            self.progress_callback(prog)
+            self._emit(prog)
 
         if not self.quiet:
             self._render()
@@ -352,16 +375,17 @@ class _GalleryDlBatchTracker:
 
     def finish(self) -> None:
         """Finalizes the dual progress display when download completes."""
+        self.phase = 'processing'
         if self.progress_callback:
             tot_b = sum(self._file_bytes.values()) if self._file_bytes else 0
-            self.progress_callback(DownloadProgress(
+            self._emit(DownloadProgress(
                 downloaded_bytes=tot_b,
                 total_bytes=None,
                 speed_bytes_sec=None,
-                percent=100.0,
+                percent=min(100.0, 100.0 * self.completed_count / self.total_files) if self.total_files else None,
                 current_file=self.album_title,
                 total_files=self.total_files,
-                file_index=self.total_files or self.completed_count,
+                file_index=self.completed_count,
                 status_message="Finalizing archive...",
             ))
         if not self.quiet:
@@ -532,7 +556,7 @@ class GalleryDlBackend(BaseBackend):
 
     _init_lock = threading.Lock()
     _pre_initialized = False
-    _config_lock = threading.Lock()
+    _config_lock = threading.RLock()
     _configured = False
 
     @classmethod
@@ -549,6 +573,29 @@ class GalleryDlBackend(BaseBackend):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         self.pre_initialize()
+
+    def _isolated_run(self, function):
+        """Keep the global configuration private until the entire worker finishes."""
+        with self._config_lock:
+            previous = copy.deepcopy(gdl_config._config)
+            previous_files = list(gdl_config._files)
+            logs = [(logging.getLogger(name), list(logging.getLogger(name).handlers), logging.getLogger(name).propagate)
+                    for name in ('gallery-dl', 'downloader', 'urllib3')]
+            configured = GalleryDlBackend._configured
+            try:
+                gdl_config.clear()
+                GalleryDlBackend._configured = False
+                return function()
+            finally:
+                # gallery-dl functions retain this dict in default arguments.
+                # Restore it in place; rebinding _config leaves those functions stale.
+                gdl_config.clear()
+                gdl_config._config.update(previous)
+                gdl_config._files[:] = previous_files
+                for logger, handlers, propagate in logs:
+                    logger.handlers = handlers
+                    logger.propagate = propagate
+                GalleryDlBackend._configured = configured
 
     def _configure_job(self, out_dir: Optional[Path] = None, disable_archive: bool = False, quiet: bool = False) -> None:
         """Loads configuration from the project's config file safely without wiping active worker memory."""
@@ -569,8 +616,8 @@ class GalleryDlBackend(BaseBackend):
 
                 # Configure fine-grained progress notification and network timeouts
                 gdl_config.set(("downloader", "http"), "progress", 0.1)
-                gdl_config.set(("downloader", "http"), "timeout", 20.0)
-                gdl_config.set(("downloader", "http"), "retries", 4)
+                gdl_config.set(("downloader", "http"), "timeout", self.config.get('timeout', 20.0))
+                gdl_config.set(("downloader", "http"), "retries", self.config.get('retries', 4))
                 gdl_config.set(("downloader", "ytdl"), "progress", 0.1)
                 gdl_config.set(("downloader", "ytdl"), "timeout", 20.0)
                 gdl_config.set(("downloader", "ytdl"), "retries", 4)
@@ -584,6 +631,8 @@ class GalleryDlBackend(BaseBackend):
             cache_file = PROJECT_ROOT / "data" / "cache.sqlite3"
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             gdl_config.set(("cache",), "file", str(cache_file.resolve()))
+            if self.config.get('proxy'):
+                gdl_config.set((), 'proxy', self.config['proxy'])
 
             # Dynamic archive configuration based on task options and global setting
             if disable_archive:
@@ -642,37 +691,59 @@ class GalleryDlBackend(BaseBackend):
             return False
 
     async def extract_info(self, url: str) -> Dict[str, Any]:
+        return await run_gallery_process(self.config, 'info', url=url)
+
+    async def _extract_info_local(self, url: str) -> Dict[str, Any]:
         """Extract metadata without downloading media."""
         cookies_browser = self.config.get("cookies_from_browser")
         cookie_file = self.config.get("cookies_file")
-        self._apply_cookies(cookies_browser=cookies_browser, cookie_file=cookie_file)
 
         def _extract() -> Dict[str, Any]:
             self._configure_job()
+            self._apply_cookies(cookies_browser=cookies_browser, cookie_file=cookie_file)
             data_job = job.DataJob(url)
             data_job.run()
             return getattr(data_job, "data", {})
 
         try:
-            data = await asyncio.to_thread(_extract)
+            data = await run_blocking(self._isolated_run, _extract)
             # Check for AuthRequired in data
             if isinstance(data, list) and len(data) == 1 and isinstance(data[0], (list, tuple)) and isinstance(data[0][-1], dict) and data[0][-1].get("error") == "AuthRequired":
                 fallback_browser = self.config.get("fallback_browser_cookies", "firefox")
                 if not cookies_browser and fallback_browser:
-                    self._apply_cookies(cookies_browser=fallback_browser)
-                    return await asyncio.to_thread(_extract)
+                    cookies_browser = fallback_browser
+                    return await run_blocking(self._isolated_run, _extract)
             return data
         except Exception as e:
             fallback_browser = self.config.get("fallback_browser_cookies", "firefox")
             if not cookies_browser and fallback_browser and any(a in str(e).lower() for a in ("auth", "login", "password", "logged-in")):
-                self._apply_cookies(cookies_browser=fallback_browser)
+                cookies_browser = fallback_browser
                 try:
-                    return await asyncio.to_thread(_extract)
+                    return await run_blocking(self._isolated_run, _extract)
                 except Exception as retry_err:
                     raise DownloadFailedError(f"gallery-dl metadata extraction failed with fallback cookies: {retry_err}")
             raise DownloadFailedError(f"gallery-dl metadata extraction failed: {e}")
 
     async def download(
+        self,
+        task: DownloadTask,
+        progress_callback: Optional[Callable[[DownloadProgress], None]] = None,
+    ) -> ArchiveEntry:
+        """Run each gallery in a process with independent library configuration."""
+        try:
+            return await run_gallery_process(self.config, 'download', task=task,
+                                              progress_callback=progress_callback)
+        except DownloadFailedError:
+            if self.config.get('enable_failover_to_cyberdrop', True) and not task.options.get('_is_failover') and not task.options.get('_managed_failover'):
+                from backends.cyberdrop_backend import CyberdropDlBackend
+                backend = CyberdropDlBackend()
+                if backend.can_handle(task.url):
+                    from dataclasses import replace
+                    fallback = replace(task, backend=backend.name, options=dict(task.options, _is_failover=True))
+                    return await backend.download(fallback, progress_callback=progress_callback)
+            raise
+
+    async def _download_local(
         self,
         task: DownloadTask,
         progress_callback: Optional[Callable[[DownloadProgress], None]] = None,
@@ -684,12 +755,21 @@ class GalleryDlBackend(BaseBackend):
 
         cookies_browser = task.options.get("cookies_from_browser", self.config.get("cookies_from_browser"))
         cookie_file = task.options.get("cookies", self.config.get("cookies_file"))
-        self._apply_cookies(cookies_browser=cookies_browser, cookie_file=cookie_file)
+        cancel_event = threading.Event()
+        original_callback = progress_callback
+        def progress_callback(progress):
+            if cancel_event.is_set():
+                raise DownloadFailedError('Download interrupted')
+            if original_callback:
+                original_callback(progress)
 
         def _run_download() -> int:
             nonlocal tracker
             disable_archive = bool(task.options.get("no_archive") or task.options.get("force"))
             self._configure_job(out_dir=out_dir, disable_archive=disable_archive, quiet=quiet)
+            if task.options.get('force'):
+                gdl_config.set(('extractor',), 'skip', False)
+            self._apply_cookies(cookies_browser=cookies_browser, cookie_file=cookie_file)
 
             tracker = _GalleryDlBatchTracker(progress_callback=progress_callback, quiet=quiet)
             _active_trackers.current = tracker
@@ -732,7 +812,7 @@ class GalleryDlBackend(BaseBackend):
                 _active_trackers.current = None
 
         try:
-            status_code = await asyncio.to_thread(_run_download)
+            status_code = await run_blocking(self._isolated_run, _run_download, cancel_event=cancel_event)
             if status_code == 20:  # ERROR_AUTHENTICATION in gallery-dl
                 fallback_browser = self.config.get("fallback_browser_cookies", "firefox")
                 if not cookies_browser and fallback_browser:
@@ -741,8 +821,8 @@ class GalleryDlBackend(BaseBackend):
                         progress_callback(DownloadProgress(status_message=auth_msg))
                     if not quiet:
                         print(f"\n{Style.tag('⚠️', 'AUTH-REQUIRED', Style.YELLOW)} Forum or gallery requires sign-in. Automatically retrying with {Style.bold(fallback_browser)} cookies...")
-                    self._apply_cookies(cookies_browser=fallback_browser)
-                    status_code = await asyncio.to_thread(_run_download)
+                    cookies_browser = fallback_browser
+                    status_code = await run_blocking(self._isolated_run, _run_download, cancel_event=cancel_event)
 
             if tracker:
                 tracker.finish()
@@ -761,8 +841,8 @@ class GalleryDlBackend(BaseBackend):
                         progress_callback(DownloadProgress(status_message=auth_msg))
                     if not quiet:
                         print(f"\n{Style.tag('⚠️', 'AUTH-REQUIRED', Style.YELLOW)} Forum or gallery requires sign-in. Automatically retrying with {Style.bold(fallback_browser)} cookies...")
-                    self._apply_cookies(cookies_browser=fallback_browser)
-                    status_code = await asyncio.to_thread(_run_download)
+                    cookies_browser = fallback_browser
+                    status_code = await run_blocking(self._isolated_run, _run_download, cancel_event=cancel_event)
                     if status_code == 0:
                         e = None
                     else:
@@ -772,7 +852,7 @@ class GalleryDlBackend(BaseBackend):
 
             if e is not None:
                 # ── Automatic Failover to cyberdrop-dl ──
-                if self.config.get("enable_failover_to_cyberdrop", True):
+                if self.config.get("enable_failover_to_cyberdrop", True) and not task.options.get("_is_failover") and not task.options.get("_managed_failover"):
                     try:
                         from backends.cyberdrop_backend import CyberdropDlBackend
                         cdl = CyberdropDlBackend()
@@ -781,11 +861,13 @@ class GalleryDlBackend(BaseBackend):
                             err_hint = "no extractor" if is_no_extractor else str(e)
                             print(f"\n{Style.tag('🔄', 'FAILOVER', Style.YELLOW)} gallery-dl encountered an issue ({err_hint}).")
                             print(f"{Style.tag('⚙️', 'FAILOVER', Style.CYAN)} Attempting automatic fallback with {Style.engine_badge('cyberdrop-dl')}...")
+                            fallback_opts = dict(task.options)
+                            fallback_opts["_is_failover"] = True
                             fallback_task = DownloadTask(
                                 url=task.url,
                                 backend="cyberdrop-dl",
                                 output_dir=task.output_dir,
-                                options=task.options,
+                                options=fallback_opts,
                             )
                             return await cdl.download(fallback_task, progress_callback=progress_callback)
                     except Exception:

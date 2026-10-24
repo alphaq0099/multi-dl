@@ -1,4 +1,5 @@
 import pytest
+import os
 import asyncio
 from pathlib import Path
 from backends.ytdlp_backend import YtDlpBackend
@@ -16,6 +17,7 @@ async def test_ytdlp_can_handle():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.getenv('RUN_NETWORK_TESTS') != '1', reason='Set RUN_NETWORK_TESTS=1 to enable live YouTube integration tests')
 async def test_ytdlp_extract_info():
     # Test metadata extraction on a short reliable test video
     backend = YtDlpBackend()
@@ -25,11 +27,12 @@ async def test_ytdlp_extract_info():
         assert info is not None
         assert "title" in info
         assert "id" in info
-    except Exception as e:
-        pytest.skip(f"Network / YouTube throttling during test: {e}")
+    except (OSError, TimeoutError) as e:
+        pytest.skip(f"Network unavailable during test: {e}")
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.getenv('RUN_NETWORK_TESTS') != '1', reason='Set RUN_NETWORK_TESTS=1 to enable live YouTube integration tests')
 async def test_ytdlp_download_and_archive(tmp_path):
     # Test downloading to a temporary directory
     backend = YtDlpBackend({
@@ -53,8 +56,8 @@ async def test_ytdlp_download_and_archive(tmp_path):
         assert Path(entry.file_path).exists()
         assert Path(entry.file_path).stat().st_size > 0
         assert entry.backend == "yt-dlp"
-    except Exception as e:
-        pytest.skip(f"Network error during download test: {e}")
+    except (OSError, TimeoutError) as e:
+        pytest.skip(f"Network unavailable during download test: {e}")
 
 
 def test_ytdlp_waf_error_detection():

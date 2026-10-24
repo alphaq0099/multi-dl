@@ -231,13 +231,19 @@ def test_unknown_key_validation(tmp_path):
         cm.set_path("nonexistent_random_key", "123")
 
 
-def test_credential_masking():
+def test_credential_masking(monkeypatch):
     """Verifies that sensitive credentials are never displayed in raw plaintext in terminal output."""
     import importlib
     multi_dl = importlib.import_module("multi-dl")
 
     format_config_value = multi_dl.format_config_value
     sanitize_proxy_display = multi_dl.sanitize_proxy_display
+
+    monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
+    monkeypatch.delenv("TELEGRAM_API_HASH", raising=False)
+    monkeypatch.delenv("TERABOX_NDUS", raising=False)
+    monkeypatch.delenv("TERABOX_NDUS_COOKIE", raising=False)
+    monkeypatch.delenv("TERABOX_JS_TOKEN", raising=False)
 
     # Sensitive keys masked entirely
     masked_hash = format_config_value("api_hash", "0123456789abcdef0123456789abcdef")

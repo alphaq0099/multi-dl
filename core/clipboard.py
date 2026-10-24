@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, List, Optional, Set
 
 from core.terminal import Style
+from core.storage import file_lock, atomic_text_write
 
 # Universal URL matcher
 URL_REGEX = re.compile(
@@ -20,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 FAILED_LINKS_PATH = DATA_DIR / "failed_links.txt"
 CLIPBOARD_HISTORY_PATH = DATA_DIR / "clipboard_history.txt"
+HISTORY_MAX_URLS = 1000
 
 
 def get_clipboard_text() -> Optional[str]:
@@ -159,16 +161,14 @@ def clear_failed_urls() -> None:
 
 
 def append_clipboard_history(urls: List[str]) -> None:
-    """Append captured clipboard URLs to data/clipboard_history.txt for permanent history backup."""
+    """Keep the most recent captured URLs in a bounded, ignored recovery file."""
     if not urls:
         return
     try:
-        CLIPBOARD_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(CLIPBOARD_HISTORY_PATH, "a", encoding="utf-8") as f:
-            for url in urls:
-                clean = url.strip()
-                if clean:
-                    f.write(f"{clean}\n")
+        with file_lock(CLIPBOARD_HISTORY_PATH):
+            entries = load_clipboard_history() + [url.strip() for url in urls if url.strip()]
+            entries = entries[-HISTORY_MAX_URLS:]
+            atomic_text_write(CLIPBOARD_HISTORY_PATH, '\n'.join(entries) + '\n')
     except Exception:
         pass
 
@@ -182,6 +182,11 @@ def load_clipboard_history() -> List[str]:
             return [line.strip() for line in f if line.strip() and not line.startswith("#")]
     except Exception:
         return []
+
+
+def clear_clipboard_history() -> None:
+    with file_lock(CLIPBOARD_HISTORY_PATH):
+        CLIPBOARD_HISTORY_PATH.unlink(missing_ok=True)
 
 
 class ClipboardWatcher:

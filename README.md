@@ -14,7 +14,7 @@
 * **v4.3.0 (Concurrent Multi-Engine Queue & Dispatcher)**: Fast pre-routing ingestion, intelligent per-engine concurrency guards (Telegram max 1, yt-dlp max 2), atomic multi-stream progress canvas, retry handling, and consolidated batch summary reports.
 * **v4.x.x (`cyberdrop-dl`)**: Subprocess engine integration for file lockers & forums, live SQLite progress tracking, directory hierarchy normalization, existing-file skip detection, and bidirectional failover.
 * **v3.x.x (`telegram-dl`)**: Native Telethon client for public/private Telegram channels & chats, interactive CLI authentication wizard (`multi-dl auth`), and engine auto-updater (`multi-dl -U`).
-* **v2.x.x (`terabox-dl`)**: Native TeraBox engine port with JS token scraping, dynamic direct links, multi-chunk threaded streaming, HTTP Range resume, and interactive TUI mode (`multi-dl -i`).
+* **v2.x.x (`terabox-dl`)**: Native TeraBox engine port with JS token scraping, dynamic direct links, validated sequential chunk streaming, HTTP Range resume, and interactive TUI mode (`multi-dl -i`).
 * **v1.x.x (`gallery-dl`)**: Python library integration for 300+ image hosting platforms and galleries, in-memory config sandboxing, and dual-line batch progress tracker.
 * **v0.x.x (`yt-dlp` & Core Architecture)**: Foundation framework with unified data models, SQLite deduplication archive, priority queue, 3-tier URL router, and yt-dlp backend with automatic Proof-of-Origin (PO) token sidecar.
 
@@ -25,8 +25,8 @@
 | Engine | Primary Media & Domains | Integration Method | Key Features |
 | :--- | :--- | :--- | :--- |
 | [**`yt-dlp`**](https://github.com/yt-dlp/yt-dlp) | YouTube, Twitch, TikTok, Twitter/X, Reddit, Vimeo, SoundCloud, 1000+ streaming sites | Embedded Python API | PO Token sidecar, EJS challenge solver, browser cookies, custom formats (`-f`), auto ffmpeg |
-| [**`gallery-dl`**](https://github.com/mikf/gallery-dl) | Image boards, manga, galleries, social media, and file hosts (Imgur, Pixiv, Danbooru, Reddit, Twitter/X, Flickr, DeviantArt, etc.) | Embedded Python Library | In-memory sandbox (`config.clear()`), batch counter, dual-line progress display |
-| [**`terabox-dl`**](https://github.com/Alex-0099/Terabox-DL) | TeraBox cloud links (`terabox.com`, `1024tera.com`, `teraboxapp.com`, etc.) | Native Python Port | JS token scraper, direct link extractor, multi-threaded chunk streaming, HTTP `Range` resume, `ndus` cookie |
+| [**`gallery-dl`**](https://github.com/mikf/gallery-dl) | Image boards, manga, galleries, social media, and file hosts (Imgur, Pixiv, Danbooru, Reddit, Twitter/X, Flickr, DeviantArt, etc.) | Embedded Python Library | Serialized jobs with isolated in-memory configuration, batch counter, dual-line progress display |
+| [**`terabox-dl`**](https://github.com/Alex-0099/Terabox-DL) | TeraBox cloud links (`terabox.com`, `1024tera.com`, `teraboxapp.com`, etc.) | Native Python Port | JS token scraper, direct link extractor, validated sequential chunk streaming, HTTP `Range` resume, `ndus` cookie |
 | [**`telegram-dl`**](https://github.com/Alex-0099/Telegram-dl) | Public/private Telegram channels, groups, direct chats (`t.me/...`) | Native [Telethon](https://github.com/LonamiWebs/Telethon) Library | Interactive auth setup wizard (`multi-dl auth`), session persistence, media type filtering |
 | [**`cyberdrop-dl`**](https://github.com/Cyberdrop-DL/cyberdrop-dl) | File lockers, community forums, image hosts, album crawlers, and multi-host aggregators | Subprocess CLI Wrapper | Live SQLite progress bar & HTTP size probing, dynamic config sandbox, locker crawler |
 
@@ -72,6 +72,27 @@
 
 ---
 
+## 🖥️ Modern Desktop GUI (Phase 4)
+
+MULTI_DOWNLOADER includes a standalone graphical desktop interface built with [Flet](https://flet.dev/) matching the Telegram-DL dark mode ecosystem:
+
+```powershell
+# Launch the desktop GUI via double-click or CLI:
+.\multi-dl-gui.bat
+.\multi-dl-gui.ps1
+python multi-dl-gui.py
+python multi-dl.py gui
+```
+
+### Key GUI Features:
+* **📥 Downloads Dashboard**: Multi-line URL box with real-time regex engine detection badges (`[YT-DLP]`, `[GALLERY-DL]`, `[TERABOX-DL]`, `[TELEGRAM-DL]`, `[CYBERDROP-DL]`), quick preset filter chips (Extract Audio MP3, Video Only, Images Only, Resolution limit), and dynamic transfer cards with dual-unit byte metrics, live speed, and ETA.
+* **📋 Queue Manager**: Live view of pending/active/completed queue tasks, one-click `Start Queue`, `Retry Failed` (loads `data/failed_links.txt`), and individual item deletion.
+* **🗄️ Archive Browser**: Interactive history browser querying the SQLite database in real time, engine filter dropdown, storage statistics cards, and one-click "Show in Folder" button.
+* **⚙️ Settings Editor**: Visual configuration for download folder picker, concurrency slider, audio chimes, proxy testing, and engine credentials (`ndus` cookie, Telegram API ID/Hash).
+* **📋 Clipboard Watcher Toggle**: Header switch to monitor the Windows clipboard and auto-download copied media links in the background.
+
+---
+
 ## 💻 CLI Usage
 
 ### 1. Direct Downloads
@@ -89,7 +110,7 @@ python multi-dl.py "https://t.me/channel_name/123"
 ```
 
 ### 2. Immediate Batch Downloads & Concurrency
-Pass a text file of URLs or multiple links to download them immediately in parallel with real-time multi-stream progress bars (processed via `data/batch_queue.json`, keeping your persistent `data/queue.json` untouched):
+Pass a text file of URLs or multiple links to download them immediately in parallel with real-time multi-stream progress bars (processed via unique files in `data/batches/`; `queue --batch` selects the latest batch, keeping your persistent `data/queue.json` untouched):
 ```powershell
 # Directly pass a text file of links (executes immediately with concurrent streams):
 python multi-dl.py links.txt
@@ -273,7 +294,7 @@ The primary configuration file at the project root connects all engines, sets do
 ---
 
 ### 3. `gallery-dl` Configuration (`configs/gallery-dl.json`)
-* **How it works**: Uses JSON format to configure extractors, file naming patterns, postprocessors, and domain-specific options. Sandboxed in-memory via `config.clear()` before every run.
+* **How it works**: Uses JSON format to configure extractors, file naming patterns, postprocessors, and domain-specific options. Each job runs in its own worker process with private library configuration, allowing different galleries to download concurrently within the configured queue, engine, and host limits. Repeated jobs for the same URL and destination wait for one another to protect files. Cancellation terminates and awaits the worker process.
 * **Key fields**:
   * `"extractor.<domain>"`: Custom options (e.g. image format, sleep intervals, tags) for specific websites.
   * `"skip"`: Set to `true` to skip re-downloading files that already exist locally.
@@ -352,3 +373,30 @@ Run the automated test suite with pytest:
 ```
 
 All 66 test cases covering routing, pre-routing classification, queue dispatcher, concurrency limits, all 5 engine adapters, configuration isolation, updater, and terminal UI pass.
+
+
+## October 2026 reliability fixes
+
+See [the fix report](AUDIT_FIXES_2026-10-20.md) for the audit findings, behavior changes, and verification limits.
+
+- Telegram/TeraBox filenames and folders include stable IDs. Existing older names are preserved.
+- Incomplete TeraBox transfers and partial batches remain retryable failures. Abandoned queue claims recover on startup.
+- Failed CLI downloads exit with code `1`; interruption exits `130`.
+- Settings credentials and proxy details are saved to ignored `config.secrets.json`. `.env` remains an input fallback; authentication tests and custom auth configurations do not rewrite it.
+- `--force` on Cyberdrop stores the new copy in a separate `forced_<id>` folder. `--no-archive` uses disposable native Cyberdrop history.
+- The bundled PO-token service uses authenticated loopback access. Restart an older running provider before using the hardened build. Startup automatically applies the tracked security patch to recognized bundled builds.
+- Clipboard URL history retains the latest 1,000 entries. Clear it with `python multi-dl.py watch --clear-history`; clear failed-link recovery history with `python multi-dl.py retry --clear`.
+
+Install the tested direct dependency versions:
+
+```powershell
+python -m pip install -r requirements.txt -c constraints-tested.txt
+```
+
+Run offline checks (development dependencies are in `requirements-dev.txt`):
+
+```powershell
+python -m pytest -q -p no:cacheprovider --basetemp scratch/verification
+```
+
+Set `RUN_NETWORK_TESTS=1` explicitly to enable the two live YouTube integration tests. The optional loopback token-service smoke check is `python tests/verify_token_service.py`.

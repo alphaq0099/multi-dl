@@ -40,6 +40,11 @@ class DownloadProgress:
     status_message: Optional[str] = None
     extractor: Optional[str] = None
     container_title: Optional[str] = None
+    phase: Optional[str] = None
+    file_name: Optional[str] = None
+    file_downloaded_bytes: Optional[int] = None
+    file_total_bytes: Optional[int] = None
+    completed_files: Optional[int] = None
 
     def update_percent(self) -> None:
         if self.total_bytes and self.total_bytes > 0:

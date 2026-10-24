@@ -10,6 +10,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Optional
+from core.pot_security import harden_provider, provider_token
 
 logger = logging.getLogger("multi_dl.pot_manager")
 
@@ -45,11 +46,12 @@ class POTManager:
         """Checks if the local PO Token server is responding to /ping."""
         url = f"http://{host}:{port}/ping"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "MULTI_DOWNLOADER/POTManager"})
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
+            req = urllib.request.Request(url, headers={"User-Agent": "MULTI_DOWNLOADER/POTManager", 'Authorization': 'Bearer ' + provider_token()})
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=1.0) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
-                    return "version" in data
+                    return 'version' in data and data.get('multi_dl_hardened') is True
         except Exception:
             return False
         return False
@@ -63,6 +65,10 @@ class POTManager:
         silent: bool = False,
     ) -> bool:
         """Verifies if the PO Token server is active; if not, spawns it as a background sidecar."""
+        if host not in ('localhost', '127.0.0.1'):
+            if not silent:
+                _safe_print('[POT-SERVER] Only a loopback provider is supported.')
+            return False
         if cls.is_server_running(host, port):
             return True
 
@@ -70,6 +76,14 @@ class POTManager:
         if not script_path:
             if not silent:
                 _safe_print("[POT-SERVER] Provider script (main.js) not found. Skipping auto-start.")
+            return False
+
+        try:
+            harden_provider(script_path.parent.parent)
+            provider_token()
+        except Exception as exc:
+            if not silent:
+                _safe_print(f'[POT-SERVER] Safe startup refused: {exc}')
             return False
 
         if not silent:

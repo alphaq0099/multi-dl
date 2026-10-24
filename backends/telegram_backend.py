@@ -10,6 +10,7 @@ Features:
 """
 
 import asyncio
+from functools import wraps
 import hashlib
 import json
 import logging
@@ -33,6 +34,21 @@ from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, MessageMe
 from backends.base import BaseBackend
 from core.exceptions import AuthenticationError, DownloadFailedError, EngineNotFoundError
 from core.models import ArchiveEntry, DownloadProgress, DownloadTask, MediaType
+from core.files import safe_name, contained_path
+from core.storage import file_lock, atomic_json_write
+from core.exceptions import ConfigError
+from core.archive import ArchiveManager
+from core.workers import run_blocking
+from core.storage import async_file_lock
+
+
+def exclusive_session(method):
+    @wraps(method)
+    async def wrapped(self, *args, **kwargs):
+        _, _, session = self._resolve_credentials()
+        async with async_file_lock(Path(session).with_suffix('.transfer')):
+            return await method(self, *args, **kwargs)
+    return wrapped
 from core.terminal import Style, format_bytes
 
 TG_LINK_REGEX = re.compile(
@@ -42,7 +58,7 @@ TG_LINK_REGEX = re.compile(
 
 def _clean_filename(filename: str) -> str:
     """Removes invalid OS filesystem characters."""
-    return re.sub(r'[<>:"/\\|?*]', '_', str(filename)).strip() or "unnamed_media"
+    return safe_name(filename, 'unnamed_media')
 
 
 def _get_media_type(message: Any) -> MediaType:
@@ -82,11 +98,19 @@ def _get_file_size(message: Any) -> int:
 def _get_message_filename(message: Any, default_ext: str = ".jpg") -> str:
     """Derives a clean filename from message attributes."""
     if getattr(message, 'file', None) and message.file.name:
-        return _clean_filename(message.file.name)
+        original = Path(_clean_filename(message.file.name))
+        message_id = getattr(message, 'id', None)
+        if isinstance(message_id, int):
+            chat_id = getattr(message, 'chat_id', None)
+            identity = f'{chat_id}_{message_id}' if isinstance(chat_id, int) else str(message_id)
+            return f'{original.stem} [{identity}]{original.suffix}'
+        return original.name
     mtype = _get_media_type(message).value
     ext = getattr(message.file, 'ext', None) or default_ext
     date_str = message.date.strftime("%Y%m%d_%H%M%S") if message.date else "nodate"
-    return f"{mtype}_{date_str}_{message.id}{ext}"
+    chat_id = getattr(message, 'chat_id', None)
+    identity = f'{chat_id}_{message.id}' if isinstance(chat_id, int) else str(message.id)
+    return f"{mtype}_{date_str}_{identity}{ext}"
 
 
 def _resolve_media_object(message: Any) -> Any:
@@ -291,7 +315,7 @@ class TelegramDlBackend(BaseBackend):
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     for k, v in data.items():
-                        if not k.startswith("//") and k not in self.config:
+                        if not k.startswith("//") and (k not in self.config or self.config[k] in (None, "")):
                             self.config[k] = v
             except Exception:
                 pass
@@ -340,30 +364,29 @@ class TelegramDlBackend(BaseBackend):
         return resolved_chat, message_id, topic_id
 
     def _save_modular_config(self) -> None:
-        """Persists updated configuration back to configs/telegram-dl.json."""
-        cfg_path_str = self.config.get("config_file", "configs/telegram-dl.json")
-        cfg_path = Path(cfg_path_str)
-        if not cfg_path.is_absolute():
-            project_root = Path(__file__).resolve().parent.parent
-            cfg_path = project_root / cfg_path
-
-        try:
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            current_data: Dict[str, Any] = {}
-            if cfg_path.exists():
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        current_data = json.load(f)
-                except Exception:
-                    pass
-            current_data["api_id"] = self.config.get("api_id")
-            current_data["api_hash"] = self.config.get("api_hash")
-            if self.config.get("session_path"):
-                current_data["session_path"] = self.config["session_path"]
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(current_data, f, indent=2)
-        except Exception:
-            pass
+        """Save credentials atomically without rewriting an unrelated .env file."""
+        project_root = Path(__file__).resolve().parent.parent
+        path = Path(self.config.get('config_file', 'configs/telegram-dl.json'))
+        if not path.is_absolute():
+            path = project_root / path
+        with file_lock(path):
+            try:
+                current = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+                if not isinstance(current, dict):
+                    raise ValueError('Expected a JSON object')
+                for key in ('api_id', 'api_hash', 'session_path'):
+                    if key in self.config:
+                        current[key] = self.config[key]
+                atomic_json_write(path, current)
+            except (OSError, ValueError, TypeError) as exc:
+                raise ConfigError('Could not save telegram credentials; existing configuration was preserved') from exc
+        if path.resolve() == (project_root / 'configs' / 'telegram-dl.json').resolve():
+            # The application master store has precedence over .env fallbacks.
+            from core.config import ConfigManager
+            master = ConfigManager()
+            for key in ('api_id', 'api_hash'):
+                if key in self.config:
+                    master.set('telegram_dl', key, self.config[key])
 
     def _prompt_api_credentials(self) -> Tuple[int, str]:
         """Interactively prompts the user for Telegram API credentials."""
@@ -407,8 +430,8 @@ class TelegramDlBackend(BaseBackend):
         custom_env = self.config.get("env_file")
         candidate_envs = [
             Path(custom_env) if custom_env else None,
-            Path.home() / "telegram-dl" / ".env",
             Path(__file__).resolve().parent.parent / ".env",
+            Path.home() / "telegram-dl" / ".env",
         ]
         for env_path in candidate_envs:
             if env_path and env_path.exists():
@@ -424,16 +447,14 @@ class TelegramDlBackend(BaseBackend):
         session_path = self.config.get("session_path")
         valid_configured = False
         if session_path:
-            p = Path(session_path)
-            if p.with_suffix(".session").exists() or p.parent.exists():
-                valid_configured = True
+            valid_configured = True
 
         if not valid_configured:
             session_path = None
             candidate_sessions = [
-                Path.home() / "telegram-dl" / "telegram_dl_session",
                 Path(__file__).resolve().parent.parent / "telegram_dl_session",
                 Path(__file__).resolve().parent.parent / "configs" / "telegram_dl_session",
+                Path.home() / "telegram-dl" / "telegram_dl_session",
             ]
             for s in candidate_sessions:
                 if s.with_suffix(".session").exists():
@@ -459,7 +480,18 @@ class TelegramDlBackend(BaseBackend):
                     "Telegram API credentials not found. Please set api_id and api_hash in configs/telegram-dl.json or .env."
                 )
 
-        self.client = TelegramClient(session_path, api_id, api_hash)
+        from urllib.parse import urlsplit, unquote
+        kwargs = {}
+        proxy = self.config.get('proxy')
+        if proxy:
+            parsed = urlsplit(proxy)
+            kind = {'socks5': 'socks5', 'socks5h': 'socks5', 'socks4': 'socks4', 'http': 'http'}.get(parsed.scheme)
+            if not kind or not parsed.hostname or not parsed.port:
+                raise AuthenticationError('Telegram proxy requires http/socks4/socks5://host:port')
+            kwargs['proxy'] = dict(proxy_type=kind, addr=parsed.hostname, port=parsed.port,
+                                   rdns=True, username=unquote(parsed.username or '') or None,
+                                   password=unquote(parsed.password or '') or None)
+        self.client = TelegramClient(session_path, api_id, api_hash, **kwargs)
         await self.client.connect()
 
         if not await self.client.is_user_authorized():
@@ -493,6 +525,7 @@ class TelegramDlBackend(BaseBackend):
             finally:
                 self.client = None
 
+    @exclusive_session
     async def extract_info(self, url: str) -> Dict[str, Any]:
         """Extracts metadata from a Telegram link without downloading."""
         chat_id, message_id, topic_id = self.parse_link(url)
@@ -533,29 +566,34 @@ class TelegramDlBackend(BaseBackend):
         message: Any,
         target_path: Path,
         progress_cb: Optional[Callable[[int, int, float, Optional[int]], None]] = None,
+        force: bool = False,
     ) -> Tuple[bool, Path]:
         """Streams a Telethon message media file in 512KB chunks with 4KB boundary resuming."""
         file_obj = _resolve_media_object(message)
         file_size = _get_file_size(message)
 
-        if target_path.exists():
+        if target_path.exists() and not force:
             existing_size = target_path.stat().st_size
-            if existing_size >= file_size and file_size > 0:
+            if existing_size == file_size and file_size > 0:
                 return True, target_path
 
         temp_path = target_path.with_suffix(target_path.suffix + ".part")
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         offset = 0
-        if temp_path.exists() and file_size > 1024 * 1024:
+        if temp_path.exists() and not force and file_size > 1024 * 1024:
             local_sz = temp_path.stat().st_size
             # Telegram requires offset divisible by 4096 bytes
             offset = (local_sz // 4096) * 4096
+            if offset >= file_size:
+                offset = 0
             if offset < 4096:
                 offset = 0
 
         mode = "r+b" if offset > 0 else "wb"
         chunk_size = int(self.config.get("chunk_size_kb", 512)) * 1024
+        if chunk_size <= 0 or chunk_size > 512 * 1024 or chunk_size % 4096:
+            raise DownloadFailedError('Telegram chunk_size_kb must be a multiple of 4 between 4 and 512')
 
         last_tick = time.time()
         last_bytes = offset
@@ -591,12 +629,15 @@ class TelegramDlBackend(BaseBackend):
 
         # Download complete -> rename .part to final
         if temp_path.exists():
-            if target_path.exists():
-                target_path.unlink()
+            if file_size > 0 and temp_path.stat().st_size != file_size:
+                raise DownloadFailedError(
+                    f"Download stream ended prematurely: expected {file_size} bytes, got {temp_path.stat().st_size} bytes."
+                )
             os.replace(temp_path, target_path)
 
         return True, target_path
 
+    @exclusive_session
     async def download(
         self,
         task: DownloadTask,
@@ -613,12 +654,40 @@ class TelegramDlBackend(BaseBackend):
             entity = await client.get_entity(chat_id)
             chat_title = getattr(entity, 'title', None) or getattr(entity, 'username', None) or str(entity.id)
             clean_chat_title = _clean_filename(chat_title)
+            entity_id = getattr(entity, 'id', chat_id)
+            if isinstance(entity_id, int):
+                clean_chat_title += f' [{entity_id}]'
 
             out_dir = Path(task.output_dir)
-            dest_folder = out_dir / clean_chat_title
+            dest_folder = contained_path(out_dir, clean_chat_title) if self.config.get('organize_by_chat', True) else out_dir.resolve()
             dest_folder.mkdir(parents=True, exist_ok=True)
 
             downloaded_files: List[Path] = []
+
+            audio_only = bool(task.options.get("audio_only") or task.options.get("extract_audio"))
+            video_only = bool(task.options.get("video_only"))
+            images_only = bool(task.options.get("images_only") or task.options.get("image_only"))
+
+            def _matches_filter(m_obj: Any) -> bool:
+                if not m_obj or not m_obj.media:
+                    return False
+                mtype = _get_media_type(m_obj)
+                allowed = self.config.get('media_types', ['photo', 'video', 'document', 'audio'])
+                normalized = {'photo': 'image', 'voice': 'audio', 'sticker': 'image'}
+                if mtype.value not in {normalized.get(t, t) for t in allowed}:
+                    return False
+                size = _get_file_size(m_obj)
+                minimum = float(self.config.get('min_file_size_mb', 0)) * 1024 * 1024
+                maximum = float(self.config.get('max_file_size_mb', 0)) * 1024 * 1024
+                if size < minimum or (maximum > 0 and size > maximum):
+                    return False
+                if audio_only and mtype != MediaType.AUDIO:
+                    return False
+                if video_only and mtype != MediaType.VIDEO:
+                    return False
+                if images_only and mtype != MediaType.IMAGE:
+                    return False
+                return True
 
             # ── Mode 1: Single Message or Smart Media Album ──
             if message_id is not None:
@@ -627,22 +696,6 @@ class TelegramDlBackend(BaseBackend):
                     raise DownloadFailedError(f"Could not find message {message_id} in {chat_title}.")
                 if not msg.media:
                     raise DownloadFailedError(f"Telegram message {message_id} contains no downloadable media.")
-
-                audio_only = bool(task.options.get("audio_only") or task.options.get("extract_audio"))
-                video_only = bool(task.options.get("video_only"))
-                images_only = bool(task.options.get("images_only") or task.options.get("image_only"))
-
-                def _matches_filter(m_obj: Any) -> bool:
-                    if not m_obj or not m_obj.media:
-                        return False
-                    mtype = _get_media_type(m_obj)
-                    if audio_only and mtype != MediaType.AUDIO:
-                        return False
-                    if video_only and mtype != MediaType.VIDEO:
-                        return False
-                    if images_only and mtype != MediaType.IMAGE:
-                        return False
-                    return True
 
                 # Check if this message belongs to a multi-media album
                 messages_to_download = [msg]
@@ -655,11 +708,10 @@ class TelegramDlBackend(BaseBackend):
                     if len(album_siblings) > 1:
                         messages_to_download = sorted(album_siblings, key=lambda m: m.id)
 
-                if audio_only or video_only or images_only:
-                    messages_to_download = [m for m in messages_to_download if _matches_filter(m)]
-                    if not messages_to_download:
-                        fname = "audio" if audio_only else ("video" if video_only else "images")
-                        raise DownloadFailedError(f"No {fname} media found in Telegram message {message_id}.")
+                messages_to_download = [m for m in messages_to_download if _matches_filter(m)]
+                if not messages_to_download:
+                    fname = "audio" if audio_only else ("video" if video_only else "images")
+                    raise DownloadFailedError(f"No {fname} media found in Telegram message {message_id}.")
 
                 total_items = len(messages_to_download)
                 total_bytes = sum(_get_file_size(m) for m in messages_to_download)
@@ -678,7 +730,7 @@ class TelegramDlBackend(BaseBackend):
 
                 for idx, m in enumerate(messages_to_download, 1):
                     filename = _get_message_filename(m)
-                    target_file = dest_folder / filename
+                    target_file = contained_path(dest_folder, filename)
                     f_size = _get_file_size(m)
 
                     def _prog_hook(received: int, total: int, speed: float, eta: Optional[int]):
@@ -700,7 +752,7 @@ class TelegramDlBackend(BaseBackend):
                             prog.update_percent()
                             progress_callback(prog)
 
-                    ok, final_p = await self._download_message_stream(client, m, target_file, progress_cb=_prog_hook)
+                    ok, final_p = await self._download_message_stream(client, m, target_file, progress_cb=_prog_hook, force=bool(task.options.get('force')))
                     if ok:
                         downloaded_files.append(final_p)
                         if tracker:
@@ -713,15 +765,11 @@ class TelegramDlBackend(BaseBackend):
             else:
                 print(f"{Style.tag('🎬', 'MEDIA', Style.YELLOW)} {Style.white(f'Scanning chat media in {chat_title}...')}")
 
-                audio_only = bool(task.options.get("audio_only") or task.options.get("extract_audio"))
-                video_only = bool(task.options.get("video_only"))
-                images_only = bool(task.options.get("images_only") or task.options.get("image_only"))
-
                 # Collect all media messages from chat history
                 media_messages: List[Any] = []
                 async for m in client.iter_messages(entity):
                     if m and m.media:
-                        if (audio_only or video_only or images_only) and not _matches_filter(m):
+                        if not _matches_filter(m):
                             continue
                         media_messages.append(m)
 
@@ -736,7 +784,7 @@ class TelegramDlBackend(BaseBackend):
 
                 for idx, m in enumerate(media_messages, 1):
                     filename = _get_message_filename(m)
-                    target_file = dest_folder / filename
+                    target_file = contained_path(dest_folder, filename)
                     f_size = _get_file_size(m)
 
                     def _prog_hook(received: int, total: int, speed: float, eta: Optional[int]):
@@ -758,7 +806,7 @@ class TelegramDlBackend(BaseBackend):
                             prog.update_percent()
                             progress_callback(prog)
 
-                    ok, final_p = await self._download_message_stream(client, m, target_file, progress_cb=_prog_hook)
+                    ok, final_p = await self._download_message_stream(client, m, target_file, progress_cb=_prog_hook, force=bool(task.options.get('force')))
                     if ok:
                         downloaded_files.append(final_p)
                         tracker.finish_file(filename, f_size)
@@ -774,17 +822,7 @@ class TelegramDlBackend(BaseBackend):
             total_size = sum(p.stat().st_size for p in downloaded_files if p.exists())
             media_type = _get_media_type(messages_to_download[0]) if message_id else MediaType.UNKNOWN
 
-            # Calculate file hash for archive
-            file_hash = None
-            if primary_file.exists():
-                try:
-                    hasher = hashlib.sha256()
-                    with open(primary_file, "rb") as f:
-                        for chunk in iter(lambda: f.read(65536), b""):
-                            hasher.update(chunk)
-                    file_hash = hasher.hexdigest()
-                except Exception:
-                    pass
+            file_hash = await run_blocking(ArchiveManager.calculate_file_hash, final_path)
 
             return ArchiveEntry(
                 id=str(uuid.uuid4()),

@@ -362,7 +362,7 @@ async def test_three_links_concurrent_slot_allocation(tmp_path):
     async def mock_dl(task: DownloadTask, progress_callback=None):
         await asyncio.sleep(0.05)
         return ArchiveEntry(
-            id="test-id",
+            id=f"test-{task.url}",
             url=task.url,
             file_path=str(tmp_path / "mock.mp4"),
             file_name="mock.mp4",

@@ -6,3 +6,5 @@ $PythonBin = if (Test-Path $VenvPython) { $VenvPython } else { "python" }
 $MainScript = Join-Path $ScriptDir "multi-dl.py"
 
 & $PythonBin $MainScript @args
+
+exit $LASTEXITCODE

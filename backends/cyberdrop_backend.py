@@ -10,6 +10,10 @@ Features:
 """
 
 import asyncio
+from functools import wraps
+from dataclasses import replace
+import tempfile
+import subprocess
 import hashlib
 import json
 import os
@@ -28,6 +32,23 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 from backends.base import BaseBackend
 from core.exceptions import DownloadFailedError, EngineNotFoundError
 from core.models import ArchiveEntry, DownloadProgress, DownloadTask, MediaType
+from core.storage import async_file_lock
+from core.workers import run_blocking, terminate_process_tree
+from core.archive import ArchiveManager
+
+
+def exclusive_destination(method):
+    @wraps(method)
+    async def wrapped(self, task, *args, **kwargs):
+        async with async_file_lock(Path(task.output_dir) / '.multi-dl-transfer'):
+            if task.options.get('no_archive'):
+                transient = PROJECT_ROOT / 'data' / 'transient'
+                transient.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(dir=transient) as state:
+                    task = replace(task, options=dict(task.options, _native_state=state))
+                    return await method(self, task, *args, **kwargs)
+            return await method(self, task, *args, **kwargs)
+    return wrapped
 from core.terminal import Style, format_bytes
 
 
@@ -45,9 +66,10 @@ def _detect_media_type(filename: str) -> MediaType:
     return MediaType.UNKNOWN
 
 
-def _probe_file_size(url: str) -> Tuple[Optional[int], Optional[int]]:
+def _probe_file_size(url: str, proxy=None) -> Tuple[Optional[int], Optional[int]]:
     """Lightweight direct metadata probe for supported file lockers. Returns (total_bytes, total_files)."""
     try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({'http': proxy, 'https': proxy})) if proxy else urllib.request.build_opener()
         parsed = urllib.parse.urlparse(url)
         domain = (parsed.netloc or "").lower()
         parts = parsed.path.strip("/").split("/")
@@ -57,7 +79,7 @@ def _probe_file_size(url: str) -> Tuple[Optional[int], Optional[int]]:
             file_id = parts[1]
             api_url = f"https://pixeldrain.com/api/file/{file_id}/info"
             req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
+            with opener.open(req, timeout=2.0) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     if data.get("success") and data.get("size"):
@@ -68,7 +90,7 @@ def _probe_file_size(url: str) -> Tuple[Optional[int], Optional[int]]:
             list_id = parts[1]
             api_url = f"https://pixeldrain.com/api/list/{list_id}"
             req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
+            with opener.open(req, timeout=2.0) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     files = data.get("files") or []
@@ -79,7 +101,7 @@ def _probe_file_size(url: str) -> Tuple[Optional[int], Optional[int]]:
         # Catbox direct links
         elif "catbox.moe" in domain and parsed.path.strip("/"):
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="HEAD")
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
+            with opener.open(req, timeout=2.0) as resp:
                 cl = resp.headers.get("Content-Length")
                 if cl:
                     return int(cl), 1
@@ -90,7 +112,7 @@ def _probe_file_size(url: str) -> Tuple[Optional[int], Optional[int]]:
             ".jpg", ".png", ".gif", ".webp", ".mp3", ".flac"
         ):
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="HEAD")
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
+            with opener.open(req, timeout=2.0) as resp:
                 cl = resp.headers.get("Content-Length")
                 if cl:
                     return int(cl), 1
@@ -278,7 +300,7 @@ class CyberdropDlBackend(BaseBackend):
         """Returns a set of all existing file paths under a directory."""
         if not directory.exists():
             return set()
-        return {p for p in directory.rglob("*") if p.is_file()}
+        return {p for p in directory.rglob("*") if p.is_file() and not p.name.endswith(('.part', '.lock'))}
 
     async def extract_info(self, url: str) -> Dict[str, Any]:
         """Extracts basic URL metadata without running full download."""
@@ -309,6 +331,12 @@ class CyberdropDlBackend(BaseBackend):
                                     sub_dest = dest / sub.name
                                     if not sub_dest.exists():
                                         shutil.move(str(sub), str(sub_dest))
+                                    else:
+                                        s_stem, s_suffix = sub.stem, sub.suffix
+                                        s_counter = 1
+                                        while (dest / f"{s_stem}_{s_counter}{s_suffix}").exists():
+                                            s_counter += 1
+                                        shutil.move(str(sub), str(dest / f"{s_stem}_{s_counter}{s_suffix}"))
                                 shutil.rmtree(str(child), ignore_errors=True)
                             else:
                                 stem, suffix = child.stem, child.suffix
@@ -341,6 +369,12 @@ class CyberdropDlBackend(BaseBackend):
                                 inner_dest = dest / inner.name
                                 if not inner_dest.exists():
                                     shutil.move(str(inner), str(inner_dest))
+                                else:
+                                    i_stem, i_suffix = inner.stem, inner.suffix
+                                    i_counter = 1
+                                    while (dest / f"{i_stem}_{i_counter}{i_suffix}").exists():
+                                        i_counter += 1
+                                    shutil.move(str(inner), str(dest / f"{i_stem}_{i_counter}{i_suffix}"))
                             shutil.rmtree(str(child), ignore_errors=True)
                         else:
                             stem, suffix = child.stem, child.suffix
@@ -355,6 +389,7 @@ class CyberdropDlBackend(BaseBackend):
         except Exception:
             pass
 
+    @exclusive_destination
     async def download(
         self,
         task: DownloadTask,
@@ -366,11 +401,13 @@ class CyberdropDlBackend(BaseBackend):
         reports real-time byte progress, and provides automatic failover to gallery-dl.
         """
         out_dir = Path(task.output_dir)
+        if task.options.get('force'):
+            out_dir = out_dir / ('forced_' + uuid.uuid4().hex)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.is_installed():
             # Check if gallery-dl can handle it as an automatic failover
-            if self.config.get("enable_failover_to_gallerydl", True):
+            if self.config.get("enable_failover_to_gallerydl", True) and not task.options.get("_managed_failover"):
                 from backends.gallerydl_backend import GalleryDlBackend
                 from core.router import URLRouter
                 gdl = GalleryDlBackend()
@@ -403,6 +440,10 @@ class CyberdropDlBackend(BaseBackend):
             "--no-print-traffic",
             "--download-folder", str(out_dir),
         ]
+        state = task.options.get('_native_state')
+        if state:
+            cmd.extend(['--database-file', str(Path(state) / 'history.db'),
+                        '--cache-file', str(Path(state) / 'cache.json')])
 
         # Directory placement and subfolder controls matching gallery-dl
         if self.config.get("subfolders", True):
@@ -424,9 +465,9 @@ class CyberdropDlBackend(BaseBackend):
         if rate_limit:
             cmd.extend(["--rate-limit", str(rate_limit)])
 
-        if self.config.get("ignore_history", True):
+        if task.options.get('force') or task.options.get('no_archive') or self.config.get("ignore_history", True):
             cmd.append("--ignore-history")
-        if self.config.get("ignore_hashes", True):
+        if task.options.get('force') or task.options.get('no_archive') or self.config.get("ignore_hashes", True):
             cmd.append("--ignore-hashes")
 
         # Apply cookies if provided
@@ -448,11 +489,11 @@ class CyberdropDlBackend(BaseBackend):
         video_only = bool(task.options.get("video_only"))
         images_only = bool(task.options.get("images_only") or task.options.get("image_only"))
         if images_only:
-            cmd.extend(["--include-image"])
+            cmd.extend(['--images', '--no-videos', '--no-audio', '--no-non-media'])
         elif video_only:
-            cmd.extend(["--include-video"])
+            cmd.extend(['--videos', '--no-images', '--no-audio', '--no-non-media'])
         elif audio_only:
-            cmd.extend(["--include-audio"])
+            cmd.extend(['--audio', '--no-images', '--no-videos', '--no-non-media'])
 
         # Apply FlareSolverr if configured
         flaresolverr = self.config.get("flaresolverr")
@@ -461,6 +502,7 @@ class CyberdropDlBackend(BaseBackend):
 
         # Take snapshot of files before download to isolate new transfers
         before_files = self._scan_files(out_dir)
+        before_state = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in before_files}
 
         quiet = bool(task.options.get("quiet") or progress_callback is not None)
         if not quiet:
@@ -469,6 +511,7 @@ class CyberdropDlBackend(BaseBackend):
         stdout_lines: List[str] = []
         failover_detected = False
         unsupported_detected = False
+        already_skipped = False
 
         # Setup UTF-8 subprocess environment
         sub_env = dict(os.environ)
@@ -476,9 +519,9 @@ class CyberdropDlBackend(BaseBackend):
         sub_env["PYTHONUTF8"] = "1"
 
         # Probe expected size from locker API, HEAD headers, or cyberdrop.db before transfer
-        probed_bytes, probed_files = _probe_file_size(task.url)
+        probed_bytes, probed_files = await run_blocking(_probe_file_size, task.url, proxy)
         if not probed_bytes:
-            probed_bytes, probed_files = _query_cdl_db_size(url=task.url)
+            probed_bytes, probed_files = await run_blocking(_query_cdl_db_size, url=task.url)
 
         stop_monitor = asyncio.Event()
         progress_active: Dict[str, Any] = {
@@ -603,6 +646,7 @@ class CyberdropDlBackend(BaseBackend):
                 await asyncio.sleep(0.3)
 
         monitor_task = None
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -610,6 +654,8 @@ class CyberdropDlBackend(BaseBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=sub_env,
+                **({'creationflags': subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
+                   if os.name == 'nt' else {'start_new_session': True}),
             )
 
             monitor_task = asyncio.create_task(_track_progress())
@@ -640,15 +686,21 @@ class CyberdropDlBackend(BaseBackend):
                     failover_detected = True
                     if not quiet:
                         print(f"{Style.tag('⚠️', 'NOTICE', Style.YELLOW)} {Style.dim(line)}")
-                elif not quiet:
-                    if "scraping" in lower_line and ("http" in lower_line or "[" in lower_line):
+                elif "scraping" in lower_line and ("http" in lower_line or "[" in lower_line):
+                    if not quiet:
                         target_info = line.split("Scraping", 1)[-1].strip() if "Scraping" in line else line
                         print(f"{Style.tag('🔍', 'SCRAPING', Style.CYAN)} {Style.dim(target_info)}")
-                    elif "skipping" in lower_line and ("hash" in lower_line or "already" in lower_line):
+                elif "skipping" in lower_line and ("hash" in lower_line or "already" in lower_line):
+                    already_skipped = True
+                    if not quiet:
                         print(f"{Style.tag('⚠️', 'SKIPPED', Style.YELLOW)} {Style.dim('File already downloaded in database')}")
 
             await proc.wait()
 
+        except asyncio.CancelledError:
+            if proc is not None and proc.returncode is None:
+                await terminate_process_tree(proc)
+            raise
         except Exception as e:
             raise DownloadFailedError(f"Failed to execute cyberdrop-dl subprocess: {e}")
         finally:
@@ -666,11 +718,13 @@ class CyberdropDlBackend(BaseBackend):
 
         # Scan for newly created files
         after_files = self._scan_files(out_dir)
-        new_files = sorted(list(after_files - before_files), key=lambda p: p.stat().st_mtime)
+        new_files = sorted([p for p in after_files
+                            if p not in before_state or before_state[p] != (p.stat().st_size, p.stat().st_mtime_ns)],
+                           key=lambda p: p.stat().st_mtime)
 
         # ── Automatic Failover Check ──
         if not new_files and (proc.returncode != 0 or failover_detected or unsupported_detected):
-            if self.config.get("enable_failover_to_gallerydl", True):
+            if self.config.get("enable_failover_to_gallerydl", True) and not task.options.get("_is_failover") and not task.options.get("_managed_failover"):
                 from backends.gallerydl_backend import GalleryDlBackend
                 from core.router import URLRouter
                 gdl = GalleryDlBackend()
@@ -679,11 +733,13 @@ class CyberdropDlBackend(BaseBackend):
                     print(f"{Style.tag('⚙️', 'FAILOVER', Style.CYAN)} Attempting automatic fallback with {Style.engine_badge('gallery-dl')}...")
                     host_id = URLRouter.get_host_identifier(task.url, self.name)
                     failover_dir = str(out_dir.parent) if out_dir.name.lower() == host_id.lower() else str(out_dir)
+                    failover_opts = dict(task.options)
+                    failover_opts["_is_failover"] = True
                     failover_task = DownloadTask(
                         url=task.url,
                         backend="gallery-dl",
                         output_dir=failover_dir,
-                        options=task.options,
+                        options=failover_opts,
                     )
                     return await gdl.download(failover_task, progress_callback=progress_callback)
 
@@ -691,7 +747,7 @@ class CyberdropDlBackend(BaseBackend):
             raise DownloadFailedError(f"cyberdrop-dl download failed:\n{err_details}")
 
         # Partial failure recovery: some files transferred but download errors occurred on others
-        if new_files and failover_detected and self.config.get("enable_failover_to_gallerydl", True):
+        if new_files and (proc.returncode != 0 or failover_detected) and self.config.get("enable_failover_to_gallerydl", True) and not task.options.get("_is_failover") and not task.options.get("_managed_failover"):
             from backends.gallerydl_backend import GalleryDlBackend
             from core.router import URLRouter
             gdl = GalleryDlBackend()
@@ -700,20 +756,34 @@ class CyberdropDlBackend(BaseBackend):
                 print(f"{Style.tag('⚙️', 'FAILOVER', Style.CYAN)} Passing to {Style.engine_badge('gallery-dl')} to ensure all files are completely retrieved...")
                 host_id = URLRouter.get_host_identifier(task.url, self.name)
                 failover_dir = str(out_dir.parent) if out_dir.name.lower() == host_id.lower() else str(out_dir)
+                failover_opts = dict(task.options)
+                failover_opts["_is_failover"] = True
                 failover_task = DownloadTask(
                     url=task.url,
                     backend="gallery-dl",
                     output_dir=failover_dir,
-                    options=task.options,
+                    options=failover_opts,
                 )
                 return await gdl.download(failover_task, progress_callback=progress_callback)
 
+        if proc.returncode != 0 or failover_detected:
+            raise DownloadFailedError('Cyberdrop reported an incomplete download; completed files were preserved.')
+
         if not new_files:
-            # Check if files already existed or were scanned without modification
-            if after_files:
-                new_files = sorted(list(after_files), key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-            else:
-                raise DownloadFailedError("cyberdrop-dl completed but no downloaded files were found.")
+            if already_skipped:
+                return ArchiveEntry(
+                    id=str(uuid.uuid4()),
+                    url=task.url,
+                    file_path=str(out_dir.resolve()),
+                    file_name="cyberdrop-dl",
+                    file_hash=None,
+                    file_size=0,
+                    backend=self.name,
+                    source_site="cyberdrop",
+                    media_type=MediaType.IMAGE,
+                    metadata={"all_skipped": True},
+                )
+            raise DownloadFailedError("cyberdrop-dl completed but no downloaded files were found.")
 
         primary_file = new_files[0]
         total_size = sum(f.stat().st_size for f in new_files if f.exists())
@@ -734,17 +804,7 @@ class CyberdropDlBackend(BaseBackend):
             progress_callback(prog)
             print()  # Finalize the carriage return line
 
-        # Calculate file hash for primary file
-        file_hash = None
-        if primary_file.exists():
-            try:
-                hasher = hashlib.sha256()
-                with open(primary_file, "rb") as f:
-                    for chunk in iter(lambda: f.read(65536), b""):
-                        hasher.update(chunk)
-                file_hash = hasher.hexdigest()
-            except Exception:
-                pass
+        file_hash = await run_blocking(ArchiveManager.calculate_file_hash, primary_file)
 
         final_name = primary_file.name if file_count == 1 else f"{primary_file.parent.name} ({file_count} files)"
 
@@ -760,6 +820,6 @@ class CyberdropDlBackend(BaseBackend):
             media_type=_detect_media_type(primary_file.name),
             metadata={
                 "total_downloaded": file_count,
-                "command": cmd,
+                "engine": self.name,
             },
         )

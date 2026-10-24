@@ -101,6 +101,8 @@ class URLRouter:
         "www.terabox.com": "terabox-dl",
         "1024tera.com": "terabox-dl",
         "www.1024tera.com": "terabox-dl",
+        "1024terabox.com": "terabox-dl",
+        "www.1024terabox.com": "terabox-dl",
         "teraboxlink.com": "terabox-dl",
         "www.teraboxlink.com": "terabox-dl",
         "freeterabox.com": "terabox-dl",
@@ -113,6 +115,10 @@ class URLRouter:
         "www.4funbox.com": "terabox-dl",
         "teraboxapp.com": "terabox-dl",
         "www.teraboxapp.com": "terabox-dl",
+        "tibibox.com": "terabox-dl",
+        "www.tibibox.com": "terabox-dl",
+        "momobox.com": "terabox-dl",
+        "www.momobox.com": "terabox-dl",
     }
 
     def __init__(self, backends: Optional[Dict[str, BaseBackend]] = None):
@@ -141,6 +147,11 @@ class URLRouter:
         if target_name and target_name in self.backends:
             return self.backends[target_name]
 
+        # Tier 1b: Domain boundary lookup (subdomain.example.com -> example.com)
+        for d, b in self.DOMAIN_MAP.items():
+            if (domain == d or domain.endswith("." + d)) and b in self.backends:
+                return self.backends[b]
+
         # Tier 2: Query each registered backend's can_handle()
         for name, backend in self.backends.items():
             try:
@@ -148,6 +159,14 @@ class URLRouter:
                     return backend
             except Exception:
                 continue
+
+        # Tier 2b: Dynamic heuristic identification before fallback
+        try:
+            detected = self.detect_backend_name(url)
+            if detected and detected in self.backends:
+                return self.backends[detected]
+        except Exception:
+            pass
 
         # Tier 3: Fallback priority (gallery-dl then yt-dlp)
         for fallback_name in ["gallery-dl", "yt-dlp"]:
@@ -188,9 +207,9 @@ class URLRouter:
         if domain in cls.DOMAIN_MAP:
             return cls.DOMAIN_MAP[domain]
 
-        # Domain substring matching
+        # Domain boundary matching (e.g. sub.domain.com matching domain.com)
         for d, b in cls.DOMAIN_MAP.items():
-            if d in domain:
+            if domain == d or domain.endswith("." + d):
                 return b
 
         # Telegram detection
@@ -198,7 +217,7 @@ class URLRouter:
             return "telegram-dl"
 
         # TeraBox mirror detection
-        if any(t in domain for t in ("terabox", "1024tera", "teraboxlink", "freeterabox", "mirrobox", "nephobox", "4funbox")):
+        if any(t in domain for t in ("terabox", "1024tera", "teraboxlink", "freeterabox", "mirrobox", "nephobox", "4funbox", "teraboxapp", "tibibox", "momobox")):
             return "terabox-dl"
 
         # Direct video files (.mp4, .mkv, .webm, .mov, etc.) route to yt-dlp
@@ -291,7 +310,7 @@ class URLRouter:
             return "youtube"
 
         # TeraBox specific normalization
-        if any(d in domain for d in ("terabox", "1024tera", "mirrobox", "nephobox", "4funbox")):
+        if any(d in domain for d in ("terabox", "1024tera", "teraboxlink", "freeterabox", "mirrobox", "nephobox", "4funbox", "teraboxapp", "tibibox", "momobox")):
             return "terabox"
 
         # Locker & community host normalization
@@ -421,7 +440,7 @@ class URLRouter:
             return False
 
         # 8. TeraBox (share folder links often have many files)
-        if any(d in domain for d in ("terabox", "1024tera", "mirrobox", "nephobox", "4funbox")):
+        if any(d in domain for d in ("terabox", "1024tera", "teraboxlink", "freeterabox", "mirrobox", "nephobox", "4funbox", "teraboxapp", "tibibox", "momobox")):
             return True
 
         # 9. Pixiv

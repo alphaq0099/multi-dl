@@ -116,7 +116,7 @@ async def test_gallerydl_failover_to_cyberdrop(monkeypatch, tmp_path):
     mock_cdl_instance.download = AsyncMock(return_value=mock_entry)
 
     with patch("backends.cyberdrop_backend.CyberdropDlBackend", return_value=mock_cdl_instance):
-        result = await backend.download(task)
+        result = await backend._download_local(task)
         assert result.backend == "cyberdrop-dl"
         mock_cdl_instance.download.assert_called_once()
 

@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import unicodedata
+from core.progress import infer_phase, plain_text
 
 # Enable ANSI virtual terminal processing and ensure UTF-8 encoding on Windows cmd/powershell
 if sys.platform == "win32":
@@ -45,6 +46,8 @@ def safe_terminal_write(text: str) -> None:
 
 def char_width(ch: str) -> int:
     """Returns terminal column width (2 for wide/fullwidth CJK and emojis, 1 otherwise)."""
+    if unicodedata.combining(ch) or ch in ('\u200d', '\ufe0e', '\ufe0f'):
+        return 0
     if ch in "🖼📥📦🎬📁🚀⚠️❌✅⏩":
         return 2
     if ch == "•":
@@ -63,19 +66,25 @@ def str_width(s: str) -> int:
 
 
 def truncate_to_width(s: str, max_cols: int) -> str:
-    """Truncates string to maximum column width, appending '...' if truncated."""
+    """Clip text by display columns while preserving complete ANSI tokens."""
+    max_cols = max(0, max_cols)
     if str_width(s) <= max_cols:
         return s
-    target = max(0, max_cols - 3)
-    cur_cols = 0
-    res = []
-    for ch in s:
-        w = char_width(ch)
-        if cur_cols + w > target:
+    if max_cols <= 3:
+        return '.' * max_cols
+    used, result = 0, []
+    ansi = False
+    for token in re.findall(r'\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]', s):
+        if token.startswith('\x1b['):
+            result.append(token)
+            ansi = True
+            continue
+        width = char_width(token)
+        if used + width > max_cols - 3:
             break
-        res.append(ch)
-        cur_cols += w
-    return "".join(res) + "..."
+        result.append(token)
+        used += width
+    return ''.join(result) + '...' + ('\033[0m' if ansi else '')
 
 
 def format_bytes(size: Optional[float]) -> str:
@@ -185,26 +194,13 @@ class Style:
         return f"{color}{cls.BOLD}[{engine_name}]{cls.RESET}"
 
     @classmethod
-    def progress_bar(cls, percent: Optional[float], width: int = 20) -> str:
+    def progress_bar(cls, percent: Optional[float], width: int = 20, color: Optional[str] = None) -> str:
         """
-        Renders a solid Unicode progress bar of given width.
-        E.g. '[███████████████░░░░░]'
-        When percent is 100%, returns a fully green completed bar.
-        When percent is None, returns an indeterminate dim bar.
+        Renders a sleek Unicode line progress bar of given width.
+        E.g. '[━━━━━━━───────]'
+        Delegates to render_line_bar for unified sleek progress styling across all engines.
         """
-        if percent is None or percent < 0:
-            return f"{cls.CYAN}[{cls.GRAY}{'░' * width}{cls.CYAN}]{cls.RESET}"
-
-        clamped = min(max(percent, 0.0), 100.0)
-        filled_len = int(round((clamped / 100.0) * width))
-        empty_len = width - filled_len
-
-        if clamped >= 100.0:
-            return f"{cls.GREEN}[{cls.GREEN}{'█' * width}{cls.GREEN}]{cls.RESET}"
-
-        filled_part = f"{cls.GREEN}{'█' * filled_len}{cls.RESET}"
-        empty_part = f"{cls.GRAY}{'░' * empty_len}{cls.RESET}"
-        return f"{cls.CYAN}[{filled_part}{empty_part}{cls.CYAN}]{cls.RESET}"
+        return render_line_bar(percent, width=width, color=color or cls.CYAN)
 
     @classmethod
     def tag(cls, emoji: str, text: str, color: str = CYAN) -> str:
@@ -306,16 +302,16 @@ class MultiBarSlot:
     total_files: Optional[int] = None
     status: str = "idle"  # idle, active, completed, failed, skipped
     status_message: Optional[str] = None  # Live phase or verbose event
+    phase: str = 'waiting'
+    file_name: Optional[str] = None
+    file_downloaded_bytes: Optional[int] = None
+    file_total_bytes: Optional[int] = None
+    completed_files: Optional[int] = None
 
 
 class MultiBarManager:
     """
-    Thread-safe, non-colliding multi-stream progress bar renderer.
-    Renders an in-place canvas matching Drawing-1.sketchpad.png:
-      Header: MULTI_DOWNLOADER ─ Active Downloads (X/Y Workers)
-      Row 1:  [Downloader]: [engine] • [title]
-      Row 2:  [━━━━━━━───────] 50.0% • 14/28 • 26.0/52.0 MB • @ 4.2 MB/s • [verbose / current file]
-      Footer: Queue: X remaining • Y completed • Z failed
+    Thread-safe progress slots with a fixed two-row layout in every transfer stage.
     """
 
     def __init__(self, max_slots: int = 3, is_tty: Optional[bool] = None):
@@ -328,16 +324,18 @@ class MultiBarManager:
         self._remaining: int = 0
         self._completed: int = 0
         self._failed: int = 0
+        self._skipped: int = 0
         self._pending_items: List[Tuple[str, str]] = []
         self._lines_printed: int = 0
         self._last_render_time: float = 0.0
         self._throttle_interval: float = 0.05
+        self._last_frame = []
 
     def set_pending_items(self, pending_items: List[Tuple[str, str]]) -> None:
         """Updates the upcoming pending queue items displayed in the canvas."""
         with self._lock:
             self._pending_items = list(pending_items)
-        self.render()
+        self.render(force=True)
 
     @staticmethod
     def _format_engine_badge(engine_name: str) -> str:
@@ -349,70 +347,48 @@ class MultiBarManager:
         """Returns clean column length ignoring ANSI escapes and accounting for wide characters."""
         return str_width(s)
 
-    def set_queue_counts(self, remaining: int, completed: int, failed: int) -> None:
+    def set_queue_counts(self, remaining: int, completed: int, failed: int, skipped: int = 0) -> None:
         """Updates overall queue counter values displayed in footer."""
         with self._lock:
             self._remaining = max(0, remaining)
             self._completed = max(0, completed)
             self._failed = max(0, failed)
-            has_active = any(s.status == "active" for s in self._slots.values())
-        if has_active:
-            self.render()
+            self._skipped = max(0, skipped)
+            should_render = (
+                self._lines_printed > 0
+                or any(s.status == "active" for s in self._slots.values())
+                or self._remaining > 0
+                or bool(self._pending_items)
+            )
+        if should_render:
+            self.render(force=True)
 
-    def assign_slot(
-        self,
-        item_id: str,
-        backend: str,
-        url_or_title: str,
-        extractor: Optional[str] = None,
-        container_title: Optional[str] = None,
-    ) -> int:
-        """Assigns an idle slot for a new concurrent worker. Returns 1-based slot_id."""
+    def assign_slot(self, item_id: str, backend: str, url_or_title: str,
+                    extractor: Optional[str] = None, container_title: Optional[str] = None) -> int:
+        """Claim a display slot and retire its pending row in the same frame."""
+        if not extractor:
+            from core.router import URLRouter
+            extractor = URLRouter.get_host_identifier(url_or_title, backend)
         with self._lock:
-            resolved_extractor = extractor
-            if not resolved_extractor and backend != "idle":
-                try:
-                    from core.router import URLRouter
-                    resolved_extractor = URLRouter.get_host_identifier(url_or_title, backend)
-                except Exception:
-                    resolved_extractor = None
-
-            assigned_id = 1
-            for slot_id, slot in self._slots.items():
-                if slot.status in ("idle", "completed", "failed", "skipped"):
-                    slot.item_id = item_id
-                    slot.backend = backend
-                    slot.extractor = resolved_extractor
-                    slot.container_title = container_title
-                    slot.url_or_title = url_or_title
-                    slot.percent = None
-                    slot.downloaded_bytes = 0
-                    slot.total_bytes = None
-                    slot.speed_bytes_sec = None
-                    slot.file_index = None
-                    slot.total_files = None
-                    slot.status = "active"
-                    slot.status_message = "Connecting..."
-                    assigned_id = slot_id
+            sid = next((sid for sid, slot in self._slots.items() if slot.status != 'active'), None)
+            if sid is None:
+                raise RuntimeError('No free transfer display slot')
+            self._slots[sid] = MultiBarSlot(slot_id=sid, item_id=item_id, backend=backend,
+                                           extractor=extractor, container_title=container_title,
+                                           url_or_title=url_or_title, status='active', phase='waiting',
+                                           status_message='Preparing download')
+            for index, pending in enumerate(self._pending_items):
+                if pending[0] == backend and pending[1] == url_or_title:
+                    del self._pending_items[index]
                     break
-            else:
-                s = self._slots[1]
-                s.item_id = item_id
-                s.backend = backend
-                s.extractor = resolved_extractor
-                s.container_title = container_title
-                s.url_or_title = url_or_title
-                s.status = "active"
-                s.status_message = "Connecting..."
-                assigned_id = 1
         self.render(force=True)
-        return assigned_id
+        return sid
 
     def update_slot(
         self,
         slot_id: int,
         percent: Optional[float] = None,
-        downloaded: int = 0,
+        downloaded: Optional[int] = None,
         total: Optional[int] = None,
         speed: Optional[float] = None,
         title: Optional[str] = None,
@@ -421,13 +397,20 @@ class MultiBarManager:
         status_message: Optional[str] = None,
         extractor: Optional[str] = None,
         container_title: Optional[str] = None,
+        phase: Optional[str] = None,
+        file_name: Optional[str] = None,
+        file_downloaded_bytes: Optional[int] = None,
+        file_total_bytes: Optional[int] = None,
+        completed_files: Optional[int] = None,
     ) -> None:
         """Updates live metrics for a specific worker slot."""
         with self._lock:
             if slot_id in self._slots:
                 slot = self._slots[slot_id]
-                slot.percent = percent
-                slot.downloaded_bytes = downloaded
+                if percent is not None:
+                    slot.percent = percent
+                if downloaded is not None:
+                    slot.downloaded_bytes = downloaded
                 if total is not None:
                     slot.total_bytes = total
                 if speed is not None:
@@ -444,6 +427,18 @@ class MultiBarManager:
                     slot.extractor = extractor
                 if container_title:
                     slot.container_title = container_title
+                slot.phase = phase or infer_phase(status_message, downloaded, speed, slot.phase)
+                if slot.phase != 'downloading':
+                    slot.speed_bytes_sec = None
+                if file_name is not None:
+                    if file_name != slot.file_name and file_downloaded_bytes == 0:
+                        slot.speed_bytes_sec = None
+                    slot.file_name = file_name
+                if file_downloaded_bytes is not None:
+                    slot.file_downloaded_bytes = file_downloaded_bytes
+                    slot.file_total_bytes = file_total_bytes
+                if completed_files is not None:
+                    slot.completed_files = completed_files
                 slot.status = "active"
         self.render()
 
@@ -492,6 +487,10 @@ class MultiBarManager:
         self.render(force=True)
 
     def render(self, force: bool = False) -> None:
+        with self._lock:
+            self._render_locked(force)
+
+    def _render_locked(self, force: bool = False) -> None:
         """Atomically renders header, unified 2-line cards (Drawing-1.sketchpad.png), and footer."""
         now = time.time()
         if not force and (now - self._last_render_time) < self._throttle_interval:
@@ -501,246 +500,231 @@ class MultiBarManager:
         term_size = shutil.get_terminal_size((80, 24))
         term_width = term_size.columns
         term_height = term_size.lines
-        card_width = max(50, min(term_width - 2, 96))
+        card_width = max(4, min(term_width - 2, 96))
         inner_w = card_width - 4
         bar_w = 12 if card_width < 80 else 14
 
         bullet = f"{Style.GRAY}•{Style.RESET}"
         sep = f" {bullet} "
 
-        with self._lock:
-            active_slots = [s for s in self._slots.values() if s.status == "active"]
-            active_count = len(active_slots)
+        active_slots = [s for s in self._slots.values() if s.status == "active"]
+        active_count = len(active_slots)
 
-            # Determine target slot count:
-            if self._remaining > 0:
-                target_count = min(self.max_slots, max(active_count, self._remaining))
-            else:
-                target_count = active_count
+        # Every visible slot keeps two content rows in all transfer stages.
+        # Leave room for the header, footer, and a bounded pending section.
+        compact_spacing = term_height < 30
+        card_overhead = (4 if compact_spacing else 5) + (2 if self._pending_items else 0)
+        max_cards_fit = max(0, (term_height - card_overhead) // (4 if compact_spacing else 5))
+        slots_to_print = active_slots[:max_cards_fit]
 
-            # Calculate physical card limit based on terminal height to eliminate scroll drift
-            card_overhead = 4 + (2 if self._pending_items else 0)
-            avail_for_cards = max(4, term_height - card_overhead)
-            max_cards_fit = max(1, avail_for_cards // 4)
-            target_count = min(target_count, max_cards_fit)
-
-            # Collect slots to render
-            if target_count == 0:
-                slots_to_print = []
-            else:
-                slots_to_print = []
-                for s in self._slots.values():
-                    if s.status == "active":
-                        slots_to_print.append(s)
-                for s in self._slots.values():
-                    if len(slots_to_print) >= target_count:
-                        break
-                    if s not in slots_to_print:
-                        slots_to_print.append(s)
-                if len(slots_to_print) > max_cards_fit:
-                    slots_to_print = slots_to_print[:max_cards_fit]
-
-            if not slots_to_print and not self._pending_items and self._lines_printed == 0:
-                return
-
-            # 1. Header Card (matching visual theme)
-            if self.max_slots == 1:
-                header_str = (
-                    f"\033[48;5;236m\033[97m\033[1m MULTI_DOWNLOADER \033[0m"
-                    f"\033[48;5;236m\033[90m─\033[0m"
-                    f"\033[48;5;236m\033[97m Active Download \033[96m(1 Worker) \033[0m"
-                )
-            else:
-                header_str = (
-                    f"\033[48;5;236m\033[97m\033[1m MULTI_DOWNLOADER \033[0m"
-                    f"\033[48;5;236m\033[90m─\033[0m"
-                    f"\033[48;5;236m\033[97m Active Downloads \033[96m({active_count}/{self.max_slots} Workers) \033[0m"
-                )
-
-            # Adapt spacing based on terminal height:
-            compact_spacing = term_height < 30
-            if compact_spacing:
-                lines_to_print = [header_str]
-            else:
-                lines_to_print = [header_str, ""]
-
-            border_c = Style.dim(Style.CYAN)
-            top_card = f"{border_c}╭{'─' * (card_width - 2)}╮{Style.RESET}"
-            bot_card = f"{border_c}╰{'─' * (card_width - 2)}╯{Style.RESET}"
-            side_l = f"{border_c}│{Style.RESET} "
-            side_r = f" {border_c}│{Style.RESET}"
-
-            # 2. Worker Slots (framed cards matching ddd.png)
-            for idx, slot in enumerate(slots_to_print):
-                if slot.status != "active":
-                    eng_badge = Style.engine_badge("idle")
-                    content1 = f"{Style.CYAN}{Style.BOLD}[Downloader]:{Style.RESET} {eng_badge}{sep}{Style.dim('connecting...')}"
-                else:
-                    eng_badge = Style.engine_badge(slot.backend)
-                    # Resolve extractor name (e.g. erome, youtube, telegram, terabox, mega, bunkr)
-                    raw_extractor = slot.extractor
-                    if not raw_extractor and slot.url_or_title:
-                        try:
-                            from core.router import URLRouter
-                            raw_extractor = URLRouter.get_host_identifier(slot.url_or_title, slot.backend)
-                        except Exception:
-                            raw_extractor = None
-                    if not raw_extractor:
-                        raw_extractor = slot.backend.replace("-dl", "")
-
-                    ext_badge = f"{Style.YELLOW}[{raw_extractor}]{Style.RESET}"
-
-                    # Resolve album/group/folder/chat/channel name, falling back to file name / title
-                    cand_title = ""
-                    if slot.container_title:
-                        cand_title = str(slot.container_title).strip()
-                    elif slot.url_or_title and not slot.url_or_title.startswith(("http://", "https://", "t.me/")):
-                        cand_title = str(slot.url_or_title).strip()
-                    elif slot.status_message and not any(slot.status_message.lower().startswith(x) for x in ("connecting", "downloading", "finalizing", "preparing")):
-                        cand_title = str(slot.status_message).strip()
-                    elif slot.url_or_title:
-                        clean_path = Path(urlparse(slot.url_or_title).path).name
-                        cand_title = clean_path or slot.url_or_title
-
-                    if not cand_title:
-                        cand_title = "downloading..."
-
-                    # Wrap in brackets [album/file name] matching ddd.png
-                    if not (cand_title.startswith("[") and cand_title.endswith("]")):
-                        bracketed_title = f"[{cand_title}]"
-                    else:
-                        bracketed_title = cand_title
-
-                    line1_lead = f"{Style.CYAN}{Style.BOLD}[Downloader]:{Style.RESET} {eng_badge}{sep}{ext_badge}{sep}"
-                    lead_len = str_width(line1_lead)
-                    avail_title = max(0, inner_w - lead_len)
-
-                    if avail_title > 6:
-                        trunc_title = truncate_to_width(bracketed_title, avail_title)
-                        content1 = f"{line1_lead}{Style.white(trunc_title)}"
-                    else:
-                        content1 = line1_lead.rstrip()
-
-                c1_w = str_width(content1)
-                pad1 = " " * max(0, inner_w - c1_w)
-                line1 = f"{side_l}{content1}{pad1}{side_r}"
-
-                # Line 2: [━━━━━━━━━━━━━━] 50.0% • 14/28 • 26.0/52.0 MB • @ 4.2 MB/s • [verbose / current file]
-                eng_color = Style.engine_color(slot.backend) if slot.status == "active" else Style.CYAN
-                bar = render_line_bar(slot.percent if slot.status == "active" else None, width=bar_w, color=eng_color)
-
-                if slot.status == "active" and slot.percent is not None:
-                    pct_str = f"{slot.percent:.1f}%"
-                    pct_color = Style.GREEN if slot.percent >= 100.0 else Style.CYAN
-                    pct_colored = f"{pct_color}{pct_str}{Style.RESET}"
-                else:
-                    pct_colored = f"{Style.dim('--%')}"
-
-                if slot.status == "active":
-                    if slot.total_files and slot.total_files > 1:
-                        cur_f = slot.file_index or 0
-                        tot_f = slot.total_files
-                        files_str = f"{cur_f}/{tot_f}"
-                    else:
-                        files_str = "1/1"
-                    bytes_str = format_dual_bytes(slot.downloaded_bytes, slot.total_bytes)
-                    if slot.speed_bytes_sec:
-                        sp_b = format_bytes(int(slot.speed_bytes_sec)) + "/s"
-                        sp_val = re.sub(r'(\.[0-9])0\s', r'\1 ', sp_b)
-                        speed_str = f"{Style.dim('@')} {Style.speed(sp_val)}"
-                    else:
-                        speed_str = f"{Style.dim('@ --/s')}"
-
-                    if slot.status_message:
-                        v_msg = slot.status_message
-                    elif slot.file_index and slot.total_files and slot.total_files > 1 and slot.url_or_title:
-                        v_msg = Path(slot.url_or_title).name
-                    elif slot.url_or_title:
-                        v_msg = Path(slot.url_or_title).name
-                    else:
-                        v_msg = "downloading..."
-                    verbose_raw = f"[{v_msg}]"
-                else:
-                    files_str = "--/--"
-                    bytes_str = "--/-- MB"
-                    speed_str = f"{Style.dim('@ --/s')}"
-                    verbose_raw = "[connecting...]"
-
-                base_line2 = (
-                    f"{bar} {pct_colored}{sep}"
-                    f"{Style.white(files_str)}{sep}"
-                    f"{Style.white(bytes_str)}{sep}"
-                    f"{speed_str}{sep}"
-                )
-                base2_len = str_width(base_line2)
-                avail_v = max(0, inner_w - base2_len)
-
-                if avail_v > 6:
-                    trunc_v = truncate_to_width(verbose_raw, avail_v)
-                    content2 = f"{base_line2}{Style.dim(Style.cyan(trunc_v))}"
-                else:
-                    content2 = base_line2.rstrip()
-
-                c2_w = str_width(content2)
-                pad2 = " " * max(0, inner_w - c2_w)
-                line2 = f"{side_l}{content2}{pad2}{side_r}"
-
-                lines_to_print.append(top_card)
-                lines_to_print.append(line1)
-                lines_to_print.append(line2)
-                lines_to_print.append(bot_card)
-
-                if idx < len(slots_to_print) - 1 and not compact_spacing:
-                    lines_to_print.append("")
-
-            # 3. Upcoming Pending Queue (bounded display: up to max_slots lines + 1 overflow line)
-            if self._pending_items:
-                if not compact_spacing:
-                    lines_to_print.append("")
-                lines_to_print.append(f"{Style.BOLD}Pending:{Style.RESET}")
-
-                # Dynamically calculate room for pending to never overflow terminal height
-                curr_lines = len(lines_to_print)
-                room = max(1, term_height - curr_lines - 3)
-                max_display = min(self.max_slots, room)
-                visible = self._pending_items[:max_display]
-                overflow = len(self._pending_items) - len(visible)
-
-                for p_eng, p_url in visible:
-                    p_badge = Style.engine_badge(p_eng)
-                    prefix = f"  {Style.CYAN}↳{Style.RESET} {p_badge} "
-                    pref_w = str_width(prefix)
-                    avail_url_w = max(10, inner_w - pref_w)
-                    trunc_url = truncate_to_width(p_url, avail_url_w)
-                    lines_to_print.append(f"{prefix}{Style.white(trunc_url)}")
-
-                if overflow > 0:
-                    plural = "s are" if overflow > 1 else " is"
-                    lines_to_print.append(f"  {Style.dim(f'[+{overflow} link{plural} pending]')}")
-
-            # 4. Spacing & Footer Line
-            if self.max_slots > 1 or self._remaining > 0 or self._completed > 1 or self._pending_items:
-                if not compact_spacing:
-                    lines_to_print.append("")
-                failed_color = Style.RED if self._failed > 0 else Style.DIM
-                footer_line = (
-                    f"{Style.BOLD}Queue:{Style.RESET} "
-                    f"{Style.CYAN}{self._remaining} remaining{Style.RESET} {bullet} "
-                    f"{Style.GREEN}{self._completed} completed{Style.RESET} {bullet} "
-                    f"{failed_color}{self._failed} failed{Style.RESET}"
-                )
-                lines_to_print.append(footer_line)
-
-        if not self.is_tty:
+        if not active_slots and not self._pending_items and self._lines_printed == 0:
             return
 
+        # 1. Header Card (matching visual theme)
+        if self.max_slots == 1:
+            header_str = (
+                f"\033[48;5;236m\033[97m\033[1m MULTI_DOWNLOADER \033[0m"
+                f"\033[48;5;236m\033[90m─\033[0m"
+                f"\033[48;5;236m\033[97m Active Download \033[96m(1 Worker) \033[0m"
+            )
+        else:
+            header_str = (
+                f"\033[48;5;236m\033[97m\033[1m MULTI_DOWNLOADER \033[0m"
+                f"\033[48;5;236m\033[90m─\033[0m"
+                f"\033[48;5;236m\033[97m Active Downloads \033[96m({active_count}/{self.max_slots} Workers) \033[0m"
+            )
+
+        # Adapt spacing based on terminal height:
+        if compact_spacing:
+            lines_to_print = [header_str]
+        else:
+            lines_to_print = [header_str, ""]
+
+        border_c = Style.dim(Style.CYAN)
+        top_card = f"{border_c}╭{'─' * (card_width - 2)}╮{Style.RESET}"
+        bot_card = f"{border_c}╰{'─' * (card_width - 2)}╯{Style.RESET}"
+        side_l = f"{border_c}│{Style.RESET} "
+        side_r = f" {border_c}│{Style.RESET}"
+
+        # 2. Worker Slots (framed cards matching ddd.png)
+        for idx, slot in enumerate(slots_to_print):
+            if slot.status != "active":
+                eng_badge = Style.engine_badge("idle")
+                content1 = f"{eng_badge}{sep}{Style.dim('connecting...')}"
+            else:
+                eng_badge = Style.engine_badge(slot.backend)
+                # Resolve extractor name (e.g. erome, youtube, telegram, terabox, mega, bunkr)
+                raw_extractor = slot.extractor
+                if not raw_extractor and slot.url_or_title:
+                    try:
+                        from core.router import URLRouter
+                        raw_extractor = URLRouter.get_host_identifier(slot.url_or_title, slot.backend)
+                    except Exception:
+                        raw_extractor = None
+                if not raw_extractor:
+                    raw_extractor = slot.backend.replace("-dl", "")
+                raw_extractor = plain_text(raw_extractor)
+
+                ext_badge = f"{Style.YELLOW}[{raw_extractor}]{Style.RESET}"
+
+                # Resolve album/group/folder/chat/channel name, falling back to file name / title
+                cand_title = ""
+                if slot.container_title:
+                    cand_title = plain_text(slot.container_title).strip()
+                elif slot.url_or_title and not slot.url_or_title.startswith(("http://", "https://", "t.me/")):
+                    cand_title = plain_text(slot.url_or_title).strip()
+                elif slot.status_message and not any(slot.status_message.lower().startswith(x) for x in ("connecting", "downloading", "finalizing", "preparing")):
+                    cand_title = plain_text(slot.status_message).strip()
+                elif slot.url_or_title:
+                    clean_path = Path(urlparse(slot.url_or_title).path).name
+                    cand_title = plain_text(clean_path or slot.url_or_title)
+
+                if not cand_title:
+                    cand_title = "downloading..."
+
+                # Wrap in brackets [album/file name] matching ddd.png
+                if not (cand_title.startswith("[") and cand_title.endswith("]")):
+                    bracketed_title = f"[{cand_title}]"
+                else:
+                    bracketed_title = cand_title
+
+                line1_lead = f"{eng_badge}{sep}{ext_badge}{sep}"
+                lead_len = str_width(line1_lead)
+                avail_title = max(0, inner_w - lead_len)
+
+                if avail_title > 6:
+                    trunc_title = truncate_to_width(bracketed_title, avail_title)
+                    content1 = f"{line1_lead}{Style.white(trunc_title)}"
+                else:
+                    content1 = line1_lead.rstrip()
+
+            c1_w = str_width(content1)
+            pad1 = " " * max(0, inner_w - c1_w)
+            line1 = f"{side_l}{content1}{pad1}{side_r}"
+
+            # Line 2: [━━━━━━━━━━━━━━] 50.0% • 14/28 • 26.0/52.0 MB • @ 4.2 MB/s • [verbose / current file]
+            eng_color = Style.engine_color(slot.backend) if slot.status == "active" else Style.CYAN
+            percent = slot.percent
+            if slot.completed_files is not None and slot.total_files:
+                percent = 100 * slot.completed_files / slot.total_files
+            bar = render_line_bar(percent, width=bar_w, color=eng_color)
+
+            if slot.status == "active" and percent is not None:
+                pct_str = f"{percent:.1f}%"
+                pct_color = Style.GREEN if percent >= 100.0 else Style.CYAN
+                pct_colored = f"{pct_color}{pct_str}{Style.RESET}"
+            else:
+                pct_colored = f"{Style.dim('--%')}"
+
+            if slot.status == "active":
+                if slot.total_files and slot.total_files > 1:
+                    cur_f = slot.completed_files if slot.completed_files is not None else (slot.file_index or 0)
+                    tot_f = slot.total_files
+                    files_str = f"{cur_f}/{tot_f}"
+                else:
+                    files_str = "1/1" if slot.phase in ("downloading", "processing") else "--/--"
+                received = slot.file_downloaded_bytes if slot.file_downloaded_bytes is not None else slot.downloaded_bytes
+                total = slot.file_total_bytes if slot.file_downloaded_bytes is not None else slot.total_bytes
+                bytes_str = format_dual_bytes(received, total) if total else format_bytes(received)
+                if slot.speed_bytes_sec:
+                    sp_b = format_bytes(int(slot.speed_bytes_sec)) + "/s"
+                    sp_val = re.sub(r'(\.[0-9])0\s', r'\1 ', sp_b)
+                    speed_str = f"{Style.dim('@')} {Style.speed(sp_val)}"
+                else:
+                    speed_str = f"{Style.dim('@ --/s')}"
+
+                if slot.phase == 'downloading' and slot.file_name:
+                    v_msg = plain_text(slot.file_name)
+                elif slot.status_message:
+                    v_msg = plain_text(slot.status_message)
+                elif slot.file_index and slot.total_files and slot.total_files > 1 and slot.url_or_title:
+                    v_msg = plain_text(Path(slot.url_or_title).name)
+                elif slot.url_or_title:
+                    v_msg = plain_text(Path(slot.url_or_title).name)
+                else:
+                    v_msg = "downloading..."
+                verbose_raw = f"[{v_msg}]"
+            else:
+                files_str = "--/--"
+                bytes_str = "--/-- MB"
+                speed_str = f"{Style.dim('@ --/s')}"
+                verbose_raw = "[connecting...]"
+
+            base_line2 = (
+                f"{bar} {pct_colored}{sep}"
+                f"{Style.white(files_str)}{sep}"
+                f"{Style.white(bytes_str)}{sep}"
+                f"{speed_str}{sep}"
+            )
+            base2_len = str_width(base_line2)
+            avail_v = max(0, inner_w - base2_len)
+
+            if avail_v > 6:
+                trunc_v = truncate_to_width(verbose_raw, avail_v)
+                content2 = f"{base_line2}{Style.dim(Style.cyan(trunc_v))}"
+            else:
+                content2 = base_line2.rstrip()
+
+            c2_w = str_width(content2)
+            pad2 = " " * max(0, inner_w - c2_w)
+            line2 = f"{side_l}{content2}{pad2}{side_r}"
+
+            lines_to_print.append(top_card)
+            lines_to_print.append(line1)
+            lines_to_print.append(line2)
+            lines_to_print.append(bot_card)
+
+            if idx < len(slots_to_print) - 1 and not compact_spacing:
+                lines_to_print.append("")
+
+        # 3. Upcoming Pending Queue (bounded display: up to max_slots lines + 1 overflow line)
+        if self._pending_items:
+            if not compact_spacing:
+                lines_to_print.append("")
+            lines_to_print.append(f"{Style.BOLD}Pending:{Style.RESET}")
+
+            # Dynamically calculate room for pending to never overflow terminal height
+            curr_lines = len(lines_to_print)
+            room = max(1, term_height - curr_lines - 3)
+            max_display = min(self.max_slots, room)
+            visible = self._pending_items[:max_display]
+            overflow = len(self._pending_items) - len(visible)
+
+            for entry in visible:
+                p_eng, p_url = entry[:2]
+                p_url = plain_text(p_url)
+                p_badge = Style.engine_badge(p_eng)
+                prefix = f"  {Style.CYAN}↳{Style.RESET} {p_badge} "
+                pref_w = str_width(prefix)
+                avail_url_w = max(10, inner_w - pref_w)
+                trunc_url = truncate_to_width(p_url, avail_url_w)
+                lines_to_print.append(f"{prefix}{Style.white(trunc_url)}")
+
+            if overflow > 0:
+                plural = "s are" if overflow > 1 else " is"
+                lines_to_print.append(f"  {Style.dim(f'[+{overflow} link{plural} pending]')}")
+
+        # 4. Spacing & Footer Line
+        if self.max_slots > 1 or self._remaining > 0 or self._completed > 1 or self._pending_items:
+            if not compact_spacing:
+                lines_to_print.append("")
+            failed_color = Style.RED if self._failed > 0 else Style.DIM
+            footer_line = (
+                f"{Style.BOLD}Queue:{Style.RESET} "
+                f"{Style.CYAN}{self._remaining} remaining{Style.RESET} {bullet} "
+                f"{Style.GREEN}{self._completed} completed{Style.RESET} {bullet} "
+                f"{failed_color}{self._failed} failed{Style.RESET}"
+                + (f" {bullet} {self._skipped} skipped" if self._skipped else "")
+            )
+            lines_to_print.append(footer_line)
+
         # Hard safety cap: Ensure lines_to_print never exceeds term_height - 2 to prevent buffer scroll
-        max_canvas_lines = max(4, term_height - 2)
+        max_canvas_lines = max(1, term_height - 2)
         if len(lines_to_print) > max_canvas_lines:
-            lines_to_print = lines_to_print[:max_canvas_lines]
+            lines_to_print = lines_to_print[:max_canvas_lines - 1] + [lines_to_print[-1]]
 
         # Clamp line width so no line reaches term_width and triggers console auto-wrap
-        max_col_allowed = max(20, term_width - 1)
+        max_col_allowed = max(1, term_width - 1)
         cleaned_lines = []
         for line in lines_to_print:
             if str_width(line) > max_col_allowed:
@@ -748,6 +732,9 @@ class MultiBarManager:
             else:
                 cleaned_lines.append(line)
         lines_to_print = cleaned_lines
+        self._last_frame = list(lines_to_print)
+        if not self.is_tty:
+            return
 
         # Atomic terminal refresh without scrolling drift: jump from last printed line back to top
         if self._lines_printed > 1:

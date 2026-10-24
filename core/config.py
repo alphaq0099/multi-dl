@@ -7,11 +7,13 @@ dot-notation access, type coercion, and per-backend isolation.
 import copy
 import json
 import os
+import math
 from pathlib import Path
 import shutil
 from typing import Any, Dict, List, Optional, Union
 
 from core.exceptions import ConfigError
+from core.storage import atomic_json_write, file_lock
 
 
 def coerce_value(val: Any) -> Any:
@@ -178,6 +180,8 @@ class ConfigManager:
 
     def __init__(self, config_path: Optional[Path] = None):
         self.config_path = config_path or self.DEFAULT_CONFIG_PATH
+        self.config_path = Path(self.config_path)
+        self._saved_data = {}
         self._data: Dict[str, Any] = {}
         self._load_env()
         self._init_example_configs()
@@ -222,7 +226,7 @@ class ConfigManager:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 if not isinstance(loaded, dict):
-                    loaded = {}
+                    raise ConfigError('Configuration must be a JSON object')
                 self._data = loaded
         except json.JSONDecodeError as e:
             raise ConfigError(f"Invalid JSON in config file: {e}")
@@ -230,6 +234,23 @@ class ConfigManager:
         # Deep-merge defaults for any missing keys
         schema_defaults = copy.deepcopy(self.DEFAULT_SCHEMA)
         modified = _deep_merge(self._data, schema_defaults)
+        self.validate(self._data)
+        modified = modified or any(self._data.get(section, {}).get(key) not in ('', None)
+                                   for section, key in (path.split('.') for path in self.SECRET_PATHS))
+        secrets_path = self.config_path.with_suffix('.secrets.json')
+        if secrets_path.exists():
+            try:
+                secrets = json.loads(secrets_path.read_text(encoding='utf-8'))
+                if not isinstance(secrets, dict):
+                    raise ValueError('Private configuration must be an object')
+                for path in self.SECRET_PATHS:
+                    section, key = path.split('.')
+                    if path in secrets:
+                        self._data[section][key] = secrets[path]
+            except (OSError, ValueError, TypeError) as exc:
+                raise ConfigError('Cannot read private configuration; original file preserved') from exc
+        self.validate(self._data)
+        self._saved_data = copy.deepcopy(self._data)
 
         # Update version if schema is newer
         if self._data.get("version") != self.DEFAULT_SCHEMA["version"]:
@@ -242,9 +263,36 @@ class ConfigManager:
     def save(self) -> None:
         """Persist current configuration to disk."""
         try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, indent=4)
+            self.validate(self._data)
+            with file_lock(self.config_path):
+                public = {}
+                private_path = self.config_path.with_suffix('.secrets.json')
+                private = {}
+                if self.config_path.exists():
+                    public = json.loads(self.config_path.read_text(encoding='utf-8'))
+                if private_path.exists():
+                    private = json.loads(private_path.read_text(encoding='utf-8'))
+                previous = getattr(self, '_saved_data', {})
+                for section, value in self._data.items():
+                    if not isinstance(value, dict):
+                        if section not in previous or previous[section] != value:
+                            public[section] = value
+                        continue
+                    public.setdefault(section, {})
+                    for key, val in value.items():
+                        path = f'{section}.{key}'
+                        changed = key not in previous.get(section, {}) or previous[section][key] != val
+                        if path in self.SECRET_PATHS:
+                            if changed or path not in private:
+                                private[path] = val
+                            public[section][key] = self.DEFAULT_SCHEMA[section][key]
+                        elif changed or key not in public[section]:
+                            public[section][key] = val
+                # Persist private values first, then remove any legacy public secrets.
+                if private:
+                    atomic_json_write(private_path, private)
+                atomic_json_write(self.config_path, public)
+                self._saved_data = copy.deepcopy(self._data)
         except OSError as e:
             raise ConfigError(f"Failed to write config file: {e}")
 
@@ -267,6 +315,9 @@ class ConfigManager:
 
     def set(self, section: str, key: str, value: Any) -> None:
         """Set a configuration option in memory and persist it."""
+        candidate = copy.deepcopy(self._data)
+        candidate.setdefault(section, {})[key] = value
+        self.validate(candidate)
         if section not in self._data or not isinstance(self._data[section], dict):
             self._data[section] = {}
         self._data[section][key] = value
@@ -445,6 +496,11 @@ class ConfigManager:
 
         coerced = coerce_value(value)
         parts = resolved.split(".")
+        known = self._data
+        for part in parts:
+            if not isinstance(known, dict) or part not in known:
+                raise ConfigError(f'Unknown configuration key: {resolved}')
+            known = known[part]
         current = self._data
         for part in parts[:-1]:
             norm_part = part
@@ -463,8 +519,13 @@ class ConfigManager:
                 last_part = last_part.replace("-", "_")
             elif last_part.replace("_", "-") in current:
                 last_part = last_part.replace("_", "-")
+        old_data = copy.deepcopy(self._data)
         current[last_part] = coerced
-        self.save()
+        try:
+            self.save()
+        except Exception:
+            self._data = old_data
+            raise
         return resolved
 
     @property
@@ -505,8 +566,7 @@ class ConfigManager:
     @property
     def proxy(self) -> Optional[str]:
         """Returns the global network proxy if set."""
-        net = self.get("network") or {}
-        return net.get("proxy") or None
+        return self.get_path('network.proxy') or None
 
     @property
     def engine_limits(self) -> Dict[str, int]:
@@ -570,4 +630,56 @@ class ConfigManager:
         # Inject global proxy fallback into backend config if not overridden
         if self.proxy and not res.get("proxy"):
             res["proxy"] = self.proxy
+        net = self.get('network') or {}
+        for key in ('timeout', 'user_agent'):
+            if net.get(key) is not None:
+                res.setdefault(key, net[key])
+        if net.get('rate_limit') is not None:
+            res.setdefault('rate_limit_bytes', net['rate_limit'])
         return res
+
+    SECRET_PATHS = ('telegram_dl.api_id', 'telegram_dl.api_hash', 'terabox_dl.ndus_cookie',
+                    'terabox_dl.js_token', 'network.proxy')
+
+    @classmethod
+    def validate(cls, data):
+        for section, defaults in cls.DEFAULT_SCHEMA.items():
+            if isinstance(defaults, dict) and not isinstance(data.get(section), dict):
+                raise ConfigError(f'{section} must be an object')
+            if not isinstance(defaults, dict):
+                continue
+            for key, default in defaults.items():
+                value = data[section].get(key, default)
+                path = f'{section}.{key}'
+                if isinstance(default, bool) and not isinstance(value, bool):
+                    raise ConfigError(f'{path} must be true or false')
+                if isinstance(default, int) and not isinstance(default, bool):
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        raise ConfigError(f'{path} must be a nonnegative integer')
+                if section == 'engine_limits' or path in ('general.concurrent_downloads', 'domain_limits.max_per_domain', 'network.timeout'):
+                    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+                        raise ConfigError(f'{path} must be positive')
+                if isinstance(default, list) and not isinstance(value, list):
+                    raise ConfigError(f'{path} must be a list')
+                if isinstance(default, str) and path != 'telegram_dl.api_id' and value is not None and not isinstance(value, str):
+                    raise ConfigError(f'{path} must be text')
+                if key in ('download_dir', 'db_path') and (not isinstance(value, str) or not value.strip()):
+                    raise ConfigError(f'{path} must be a nonempty path')
+                if isinstance(value, float) and not math.isfinite(value):
+                    raise ConfigError(f'{path} must be finite')
+        for section in ('engine_limits',):
+            for key, value in data.get(section, {}).items():
+                if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                    raise ConfigError(f'{section}.{key} must be a positive integer')
+        api_id = data['telegram_dl'].get('api_id')
+        if api_id not in ('', None) and (isinstance(api_id, bool) or not str(api_id).isdigit() or int(api_id) <= 0):
+            raise ConfigError('telegram_dl.api_id must be a positive Telegram API ID')
+        for path in ('network.rate_limit', 'yt_dlp.rate_limit_bytes'):
+            section, key = path.split('.')
+            value = data[section].get(key)
+            if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0):
+                raise ConfigError(f'{path} must be a positive number or null')
+        for key in ('proxy', 'user_agent'):
+            value = data['network'].get(key)
+            if value is not None and not isinstance(value, str):
+                raise ConfigError(f'network.{key} must be text or null')

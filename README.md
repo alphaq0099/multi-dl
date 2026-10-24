@@ -378,8 +378,6 @@ All 66 test cases covering routing, pre-routing classification, queue dispatcher
 
 ## October 2026 reliability fixes
 
-See [the fix report](AUDIT_FIXES_2026-10-20.md) for the audit findings, behavior changes, and verification limits.
-
 - Telegram/TeraBox filenames and folders include stable IDs. Existing older names are preserved.
 - Incomplete TeraBox transfers and partial batches remain retryable failures. Abandoned queue claims recover on startup.
 - Failed CLI downloads exit with code `1`; interruption exits `130`.

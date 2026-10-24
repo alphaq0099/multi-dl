@@ -14,11 +14,9 @@ from functools import wraps
 from dataclasses import replace
 import tempfile
 import subprocess
-import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import sys
 import time
@@ -49,7 +47,7 @@ def exclusive_destination(method):
                     return await method(self, task, *args, **kwargs)
             return await method(self, task, *args, **kwargs)
     return wrapped
-from core.terminal import Style, format_bytes
+from core.terminal import Style
 
 
 def _detect_media_type(filename: str) -> MediaType:

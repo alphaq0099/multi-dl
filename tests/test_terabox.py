@@ -4,7 +4,6 @@ Unit tests for TeraboxDlBackend and TeraBox URL routing.
 
 import asyncio
 import json
-import os
 from pathlib import Path
 import pytest
 

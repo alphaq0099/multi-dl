@@ -1,14 +1,12 @@
 import pytest
-import sqlite3
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from core.archive import ArchiveManager
 from core.dispatcher import QueueDispatcher
 from core.exceptions import ArchiveDuplicateError
-from core.models import ArchiveEntry, MediaType, QueueItem, TaskStatus
+from core.models import ArchiveEntry, MediaType
 from core.queue_manager import QueueManager
 from core.router import URLRouter
 

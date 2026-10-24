@@ -6,11 +6,9 @@ type coercion, dynamic engine limits, and domain throttling guards.
 
 import json
 from pathlib import Path
-import tempfile
 import pytest
 
 from core.config import ConfigManager, coerce_value
-from core.models import QueueItem, TaskStatus
 from core.queue_manager import QueueManager, extract_url_domain
 
 
@@ -48,7 +46,7 @@ def test_config_fresh_creation(tmp_path):
 
     cm = ConfigManager(config_path=cfg_file)
     assert cfg_file.exists()
-    assert cm.get("version") == "4.6.0"
+    assert cm.get("version") == ConfigManager.DEFAULT_SCHEMA["version"]
     assert cm.get("general", "concurrent_downloads") == 3
     assert cm.engine_limits["yt-dlp"] == 2
     assert cm.engine_limits["telegram-dl"] == 1
@@ -77,7 +75,7 @@ def test_config_deep_merge_migration(tmp_path):
     assert cm.get("yt_dlp", "format") == "custom_format_string"
 
     # Missing schema keys merged
-    assert cm.get("version") == "4.6.0"
+    assert cm.get("version") == ConfigManager.DEFAULT_SCHEMA["version"]
     assert cm.get("network", "timeout") == 30
     assert cm.engine_limits["yt-dlp"] == 2
     assert cm.domain_limits["max_per_domain"] == 1

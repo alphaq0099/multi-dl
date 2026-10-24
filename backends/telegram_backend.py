@@ -9,9 +9,7 @@ Features:
 - In-place dual batch progress bar strictly constrained to terminal width
 """
 
-import asyncio
 from functools import wraps
-import hashlib
 import json
 import logging
 import os
@@ -21,7 +19,6 @@ import shutil
 import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
-import urllib.parse
 import uuid
 
 # Silence verbose background MTProto protocol warnings from polluting terminal output
@@ -29,10 +26,10 @@ logging.getLogger("telethon").setLevel(logging.ERROR)
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
-from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, MessageMediaWebPage
+from telethon.tl.types import MessageMediaWebPage
 
 from backends.base import BaseBackend
-from core.exceptions import AuthenticationError, DownloadFailedError, EngineNotFoundError
+from core.exceptions import AuthenticationError, DownloadFailedError
 from core.models import ArchiveEntry, DownloadProgress, DownloadTask, MediaType
 from core.files import safe_name, contained_path
 from core.storage import file_lock, atomic_json_write

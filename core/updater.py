@@ -4,7 +4,6 @@ Handles checking, updating, and synchronizing all download engines (pip packages
 """
 
 import importlib.metadata
-import os
 from pathlib import Path
 import shutil
 import subprocess

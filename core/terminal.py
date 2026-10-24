@@ -131,7 +131,7 @@ def format_dual_bytes(downloaded: int, total: Optional[int]) -> str:
 
 def render_line_bar(percent: Optional[float], width: int = 14, color: str = "\033[96m") -> str:
     """
-    Renders sleek line progress bar matching terabox-dl and Drawing-1.sketchpad.png:
+    Renders the sleek line progress bar used across all engines:
     E.g. '[━━━━━━━───────]'
     """
     cyan = "\033[96m"
@@ -213,20 +213,12 @@ class Style:
         return f"{clean_emoji} {color}{cls.BOLD}[{text}]{cls.RESET}"
 
     @classmethod
-    def highlight(cls, text: str, color: str = WHITE) -> str:
-        return f"{color}{text}{cls.RESET}"
-
-    @classmethod
     def bold(cls, text: str) -> str:
         return f"{cls.BOLD}{text}{cls.RESET}"
 
     @classmethod
     def dim(cls, text: str) -> str:
         return f"{cls.DIM}{text}{cls.RESET}"
-
-    @classmethod
-    def muted(cls, text: str) -> str:
-        return f"{cls.GRAY}{text}{cls.RESET}"
 
     @classmethod
     def cyan(cls, text: str) -> str:
@@ -470,28 +462,12 @@ class MultiBarManager:
         # Always render immediately so slot retirement is reflected without freeze
         self.render(force=True)
 
-    def print_log(self, text: str) -> None:
-        """Atomically prints a log message above the active canvas without visual distortion."""
-        with self._lock:
-            if self.is_tty and self._lines_printed > 0:
-                if self._lines_printed > 1:
-                    safe_terminal_write(f"\033[{self._lines_printed - 1}A\r\033[J")
-                else:
-                    safe_terminal_write("\r\033[J")
-                self._lines_printed = 0
-            safe_terminal_write(f"{text}\n")
-            try:
-                sys.stdout.flush()
-            except Exception:
-                pass
-        self.render(force=True)
-
     def render(self, force: bool = False) -> None:
         with self._lock:
             self._render_locked(force)
 
     def _render_locked(self, force: bool = False) -> None:
-        """Atomically renders header, unified 2-line cards (Drawing-1.sketchpad.png), and footer."""
+        """Atomically renders header, unified 2-line cards, and footer."""
         now = time.time()
         if not force and (now - self._last_render_time) < self._throttle_interval:
             return
@@ -546,7 +522,7 @@ class MultiBarManager:
         side_l = f"{border_c}│{Style.RESET} "
         side_r = f" {border_c}│{Style.RESET}"
 
-        # 2. Worker Slots (framed cards matching ddd.png)
+        # 2. Worker Slots (framed cards)
         for idx, slot in enumerate(slots_to_print):
             if slot.status != "active":
                 eng_badge = Style.engine_badge("idle")
@@ -582,7 +558,7 @@ class MultiBarManager:
                 if not cand_title:
                     cand_title = "downloading..."
 
-                # Wrap in brackets [album/file name] matching ddd.png
+                # Wrap in brackets [album/file name]
                 if not (cand_title.startswith("[") and cand_title.endswith("]")):
                     bracketed_title = f"[{cand_title}]"
                 else:

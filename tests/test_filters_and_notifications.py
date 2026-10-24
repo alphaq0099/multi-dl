@@ -3,8 +3,6 @@ Unit tests for quick format filters, media type filters, and notification settin
 """
 
 import json
-from pathlib import Path
-import pytest
 from core.config import ConfigManager
 from core.router import parse_resolution_height, resolve_format_spec
 import importlib

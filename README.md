@@ -2,12 +2,13 @@
 
 > A modern, unified multi-platform downloader orchestrating [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), [`gallery-dl`](https://github.com/mikf/gallery-dl), [`terabox-dl`](https://github.com/Alex-0099/Terabox-DL), [`telegram-dl`](https://github.com/Alex-0099/Telegram-dl), and [`cyberdrop-dl`](https://github.com/Cyberdrop-DL/cyberdrop-dl) with isolated configurations, shared SQLite deduplication archive, persistent priority queue, two-way automatic failover, and interactive terminal interface.
 
-**Current Version:** `v4.6.0`
+**Current Version:** `v4.7.0`
 
 ---
 
 ## 📋 Changelog
 
+* **v4.7.0 (Audit Hardening, Credential Safety & Project Cleanup)**: 21-point reliability/security audit remedies (atomic queue/config persistence with crash recovery, transfer integrity checks, gallery-dl process isolation, hardened local PO-token provider), credential safety (validated TeraBox ndus handling, secrets-store-only persistence, pre-commit secret-scan guard, CLI exit codes), TeraBox CDN-403 auto-recovery with fresh dlink resolution, and a project-wide dead-code/stale-comment cleanup with refreshed dependency constraints.
 * **v4.6.0 (Live Clipboard Watcher, Cross-Directory Resilience & Recovery)**: Real-time Clipboard Auto-Watcher (`watch` / `clipboard`) with auto-downloading and audio notifications, permanent cross-directory path anchoring (ensures identical behavior regardless of execution directory), failed download auto-recovery (`retry` / `data/failed_links.txt`), extended locker routing (`hotpic2.cc`, `hotpic.cc`), and gallery-dl cache isolation.
 * **v4.5.0 (Centralized Configuration & Proxy Architecture)**: Dot-notation config management (`multi-dl config set/get`), engine concurrency limits, per-domain connection throttling guards, network proxy testing (`multi-dl proxy test`), and sensitive credential masking.
 * **v4.4.0 (Unified Deduplication Archive & Container-Aware Smart Skipping)**: Central SQLite archive (`data/archive.db`), multi-tier container intelligence (skipping single media in 1ms while delegating playlists/bookmarks/albums to granular per-category item archives), `multi-dl archive` CLI management (`--list`, `--search`, `--remove`, `--clear`), `--force` and `--no-archive` flags, and native PowerShell runner (`multi-dl.ps1`).
@@ -358,7 +359,7 @@ This tool orchestrates and relies on the following open-source projects:
 * [**gallery-dl**](https://github.com/mikf/gallery-dl) — Image and album scraper for image boards, galleries, and archives ([Codeberg Mirror](https://codeberg.org/mikf/gallery-dl)).
 * [**cyberdrop-dl**](https://github.com/Cyberdrop-DL/cyberdrop-dl) — Bulk file and forum scraper for lockers, forums, and multi-host aggregators.
 * [**Telegram-dl**](https://github.com/Alex-0099/Telegram-dl) & [**Telethon**](https://github.com/LonamiWebs/Telethon) — Fast, asynchronous MTProto Python client for Telegram media downloads.
-* [**Terabox-DL**](https://github.com/Alex-0099/Terabox-DL) — Direct link extractor and multi-threaded chunk downloader for TeraBox.
+* [**Terabox-DL**](https://github.com/Alex-0099/Terabox-DL) — Direct link extractor and resumable chunked-stream downloader for TeraBox.
 * [**FFmpeg**](https://ffmpeg.org/) — Cross-platform multimedia framework for stream muxing, remuxing, and post-processing.
 * [**curl_cffi**](https://github.com/yifeikong/curl_cffi) — Python binding for `curl-impersonate` enabling browser TLS fingerprint emulation.
 

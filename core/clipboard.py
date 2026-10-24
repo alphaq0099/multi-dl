@@ -1,14 +1,11 @@
 """Clipboard auto-monitor, notification chimes, and failed-link recovery for MULTI_DOWNLOADER."""
 
-import asyncio
-import os
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, List, Optional, Set
+from typing import List, Optional, Set
 
-from core.terminal import Style
 from core.storage import file_lock, atomic_text_write
 
 # Universal URL matcher

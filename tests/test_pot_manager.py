@@ -1,6 +1,5 @@
 """Tests for POTManager (Proof-of-Origin Token Sidecar Provider)."""
 
-import pytest
 from core.pot_manager import POTManager
 
 

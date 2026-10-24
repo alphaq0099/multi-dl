@@ -3,7 +3,7 @@ URL Router for MULTI_DOWNLOADER.
 Directs incoming URLs to the appropriate backend using a 3-tier matching engine.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 from backends.base import BaseBackend
@@ -123,10 +123,6 @@ class URLRouter:
 
     def __init__(self, backends: Optional[Dict[str, BaseBackend]] = None):
         self.backends: Dict[str, BaseBackend] = backends or {}
-
-    def register_backend(self, backend: BaseBackend) -> None:
-        """Register a backend instance with the router."""
-        self.backends[backend.name] = backend
 
     def route(self, url: str, backend_override: Optional[str] = None) -> BaseBackend:
         """

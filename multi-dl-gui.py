@@ -1,21 +1,17 @@
 """
-MULTI_DOWNLOADER — Modern Desktop GUI Application (v4.6.0)
+MULTI_DOWNLOADER — Modern Desktop GUI Application (v4.7.0)
 Universal modular downloader combining yt-dlp, gallery-dl, terabox-dl, telegram-dl,
 and cyberdrop-dl with unified dark-mode UI, active download cards, queue manager,
 archive deduplication browser, live clipboard auto-watcher, and visual settings.
 """
 
 import asyncio
-from datetime import datetime
-import json
 import logging
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
-import time
 import traceback
 from typing import Any, Dict, List, Optional, Set
 
@@ -115,11 +111,11 @@ logger = logging.getLogger("MultiDlGUI")
 
 # Multi-Downloader Core Modules
 from core.archive import ArchiveManager
-from core.clipboard import ClipboardWatcher, FAILED_LINKS_PATH, load_failed_urls, play_chime
+from core.clipboard import ClipboardWatcher, load_failed_urls
 from core.config import ConfigManager
 from core.dispatcher import QueueDispatcher
-from core.gui_tracker import GuiDownloadSlot, GuiMultiBarTracker, format_bytes, format_dual_bytes
-from core.models import ArchiveEntry, QueueItem, TaskStatus
+from core.gui_tracker import GuiMultiBarTracker, format_bytes, format_dual_bytes
+from core.models import ArchiveEntry, TaskStatus
 from core.queue_manager import QueueManager
 from core.router import URLRouter
 
@@ -170,7 +166,7 @@ async def main(page: ft.Page):
     logger.info("Initializing MULTI_DOWNLOADER GUI...")
 
     # --- Page & Window Configuration ---
-    page.title = "MULTI_DOWNLOADER — Universal Media & File Downloader (v4.6.0)"
+    page.title = "MULTI_DOWNLOADER — Universal Media & File Downloader (v4.7.0)"
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = BG_COLOR
     page.padding = 0
@@ -277,7 +273,7 @@ async def main(page: ft.Page):
             ft.Icon(ft.Icons.CLOUD_DOWNLOAD_ROUNDED, color=ACCENT_CYAN, size=28),
             ft.Text("MULTI_DOWNLOADER", size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
             ft.Container(
-                content=ft.Text("v4.6.0", size=11, color=ACCENT_CYAN, weight=ft.FontWeight.W_600),
+                content=ft.Text("v4.7.0", size=11, color=ACCENT_CYAN, weight=ft.FontWeight.W_600),
                 bgcolor="#00E5FF1A",
                 border=ft.Border.all(1, "#00E5FF4D"),
                 border_radius=6,

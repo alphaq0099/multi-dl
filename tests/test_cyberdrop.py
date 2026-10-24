@@ -3,7 +3,6 @@ Unit tests for CyberdropDlBackend and cyberdrop-dl URL routing.
 """
 
 import asyncio
-from pathlib import Path
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 

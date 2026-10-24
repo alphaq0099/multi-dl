@@ -3,10 +3,8 @@ Adapter backend wrapping gallery-dl via its Python API.
 Ensures config isolation by resetting memory config state and loading from modular configs.
 """
 
-import asyncio
 import copy
 import logging
-import os
 from pathlib import Path
 import re
 import shutil

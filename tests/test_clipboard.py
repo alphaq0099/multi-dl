@@ -1,18 +1,9 @@
 """Unit tests for core/clipboard.py: clipboard watcher, URL extractor, and failed link storage."""
 
-import os
-from pathlib import Path
 from unittest.mock import patch
 import pytest
 
-from core.clipboard import (
-    ClipboardWatcher,
-    clear_failed_urls,
-    extract_urls,
-    load_failed_urls,
-    save_failed_urls,
-    FAILED_LINKS_PATH,
-)
+from core.clipboard import ClipboardWatcher, clear_failed_urls, extract_urls, load_failed_urls, save_failed_urls
 
 
 def test_extract_urls():

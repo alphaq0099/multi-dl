@@ -5,7 +5,6 @@ chunked streaming, and in-place dual progress bars.
 """
 
 import asyncio
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,7 +21,7 @@ import requests
 from dotenv import load_dotenv
 
 from backends.base import BaseBackend
-from core.exceptions import AuthenticationError, DownloadFailedError, EngineNotFoundError
+from core.exceptions import AuthenticationError, DownloadFailedError
 from core.models import ArchiveEntry, DownloadProgress, DownloadTask, MediaType
 from core.files import safe_name, contained_path
 from core.storage import file_lock, atomic_json_write

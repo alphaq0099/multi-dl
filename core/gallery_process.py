@@ -1,7 +1,6 @@
 """A gallery job owns a subprocess; credentials travel through stdin, not argv."""
 import asyncio
 from collections import deque
-from dataclasses import asdict
 from datetime import date, datetime
 from enum import Enum
 import json

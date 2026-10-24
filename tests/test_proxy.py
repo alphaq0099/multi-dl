@@ -3,7 +3,6 @@ Unit tests for Proxy verification and management in MULTI_DOWNLOADER.
 """
 
 from unittest.mock import MagicMock, patch
-import pytest
 
 from core.config import ConfigManager
 import importlib

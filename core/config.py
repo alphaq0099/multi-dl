@@ -10,7 +10,7 @@ import os
 import math
 from pathlib import Path
 import shutil
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional
 
 from core.exceptions import ConfigError
 from core.storage import atomic_json_write, file_lock
@@ -84,7 +84,7 @@ class ConfigManager:
     DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
 
     DEFAULT_SCHEMA: Dict[str, Any] = {
-        "version": "4.6.0",
+        "version": "4.7.0",
         "general": {
             "download_dir": "downloads",
             "concurrent_downloads": 3,

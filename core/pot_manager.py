@@ -1,6 +1,5 @@
 """Proof-of-Origin (PO) Token Provider sidecar manager for MULTI_DOWNLOADER."""
 
-import os
 import sys
 import time
 import json

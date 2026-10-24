@@ -3,20 +3,11 @@ Unit tests for TelegramDlBackend and Telegram URL routing.
 """
 
 from datetime import datetime
-import os
-from pathlib import Path
 import pytest
 from unittest.mock import MagicMock
 
-from backends.telegram_backend import (
-    TelegramDlBackend,
-    _clean_filename,
-    _get_file_size,
-    _get_media_type,
-    _get_message_filename,
-    _resolve_media_object,
-)
-from core.exceptions import AuthenticationError, DownloadFailedError
+from backends.telegram_backend import TelegramDlBackend, _clean_filename, _get_file_size, _get_media_type, _get_message_filename
+from core.exceptions import AuthenticationError
 from core.models import MediaType
 from core.router import URLRouter
 

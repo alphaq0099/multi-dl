@@ -3,12 +3,10 @@ Unit tests for the Queue Manager, Fast Pre-Routing, and Queue Dispatcher.
 """
 
 import asyncio
-from pathlib import Path
-import tempfile
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-from core.models import ArchiveEntry, DownloadProgress, DownloadTask, TaskStatus, BatchSummaryReport
+from core.models import ArchiveEntry, DownloadTask, TaskStatus, BatchSummaryReport
 from core.queue_manager import QueueManager
 from core.router import URLRouter
 from core.dispatcher import QueueDispatcher

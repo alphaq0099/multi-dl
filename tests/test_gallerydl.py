@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 from backends.gallerydl_backend import GalleryDlBackend
 from gallery_dl import config as gdl_config
 

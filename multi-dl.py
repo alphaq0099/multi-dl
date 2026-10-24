@@ -4,7 +4,6 @@ CLI entry point for MULTI_DOWNLOADER.
 
 import argparse
 import asyncio
-import io
 import json
 import os
 import re
@@ -30,9 +29,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-__version__ = "4.6.0"
+__version__ = "4.7.0"
 
-from core.terminal import Style, str_width, truncate_to_width
+from core.terminal import Style, format_bytes, str_width, truncate_to_width
 
 
 def _sigint_handler(signum=None, frame=None):
@@ -42,24 +41,14 @@ def _sigint_handler(signum=None, frame=None):
     raise KeyboardInterrupt
 
 
-from backends.gallerydl_backend import GalleryDlBackend
 from backends.telegram_backend import TelegramDlBackend
 from backends.terabox_backend import TeraboxDlBackend
-from backends.ytdlp_backend import YtDlpBackend
-from backends.cyberdrop_backend import CyberdropDlBackend
 from core.archive import ArchiveManager
-from core.clipboard import (
-    ClipboardWatcher,
-    clear_failed_urls,
-    clear_clipboard_history,
-    load_failed_urls,
-    play_chime,
-    CLIPBOARD_HISTORY_PATH,
-)
+from core.clipboard import ClipboardWatcher, clear_failed_urls, clear_clipboard_history, load_failed_urls, CLIPBOARD_HISTORY_PATH
 from core.config import ConfigManager
 from core.dispatcher import QueueDispatcher
 from core.exceptions import MultiDLError, ConfigError
-from core.models import ArchiveEntry, DownloadProgress, DownloadTask, TaskStatus
+from core.models import ArchiveEntry, TaskStatus
 from core.queue_manager import QueueManager
 from core.router import URLRouter
 from core.updater import EngineUpdater
@@ -90,15 +79,6 @@ def run_download(coroutine):
         raise SystemExit(1)
     return report
 
-
-
-def format_bytes(size: int) -> str:
-    """Formats bytes to human-readable string (KB, MB, GB)."""
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size < 1024.0:
-            return f"{size:.2f} {unit}"
-        size /= 1024.0
-    return f"{size:.2f} PB"
 
 
 
@@ -793,7 +773,7 @@ def handle_config_command(config: ConfigManager, args_list: List[str]) -> None:
         engine_limits = config.engine_limits
         domain_limits = config.domain_limits
         max_domain = config.get_max_per_domain()
-        cfg_ver = config.get("version", "4.6.0")
+        cfg_ver = config.get("version", "4.7.0")
 
         print(f"\n{Style.tag('⚙️', 'CONFIG', Style.CYAN)} {Style.bold(f'Current Configuration (v{cfg_ver})')}\n")
         print(f"  {Style.bold('🌐 General & Network:')}")

@@ -1,9 +1,8 @@
 import pytest
 import os
-import asyncio
 from pathlib import Path
 from backends.ytdlp_backend import YtDlpBackend
-from core.models import DownloadTask, TaskStatus
+from core.models import DownloadTask
 
 
 @pytest.mark.asyncio

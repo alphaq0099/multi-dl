@@ -146,27 +146,38 @@ def test_config_bridge_forces_gallery_dl_off(tmp_path):
 
 
 def test_progress_hooks_emit_updates(tmp_path):
-    """Probe and transfer events surface as DownloadProgress updates."""
+    """Probe and transfer events surface as slot-renderable DownloadProgress.
+
+    The slot bar/percent render from completed_files/total_files, the file
+    counter from the same pair, and per-file bytes from the file_* fields.
+    """
     backend = make_backend(tmp_path)
     events = []
-    probe, transfer = backend._make_progress_hooks(events.append)
+    probe, batch, transfer = backend._make_progress_hooks(events.append)
 
     probe(2, 7)
     assert events[-1].phase == 'resolving'
     assert '2/7' in events[-1].status_message
+    assert (events[-1].completed_files, events[-1].total_files) == (2, 7)
+    assert events[-1].file_downloaded_bytes is None  # counts must not leak into byte fields
+
+    batch(3)
 
     class FakeInfo:
         url = "https://cdn.example/img.jpg"
         length = 100
 
     transfer(FakeInfo(), 40)
-    transfer(FakeInfo(), 60)
-    transfer(FakeInfo(), 0, done=True)
-    last = events[-1]
-    assert last.phase == 'downloading'
-    assert last.file_name == "img.jpg"
-    assert last.file_downloaded_bytes == 100
-    assert last.file_total_bytes == 100
+    mid = events[-1]
+    assert mid.phase == 'downloading'
+    assert mid.file_name == "img.jpg"
+    assert (mid.file_downloaded_bytes, mid.file_total_bytes) == (40, 100)
+    assert (mid.completed_files, mid.total_files) == (0, 3)
+    transfer(FakeInfo(), 60, done=True)
+    done_evt = events[-1]
+    assert (done_evt.file_downloaded_bytes, done_evt.file_total_bytes) == (100, 100)
+    assert done_evt.completed_files == 1
+    assert done_evt.downloaded_bytes == 100
 
 
 def test_transfer_hook_fires_from_engine_downloader(tmp_path):

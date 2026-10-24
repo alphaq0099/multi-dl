@@ -82,7 +82,7 @@ class StateStore:
 
 class Downloader:
     def __init__(self, cfg: Config, fetcher: Fetcher, state: StateStore, progress=None,
-                 transfer_hook=None):
+                 transfer_hook=None, batch_hook=None):
         self.cfg = cfg
         self.fetcher = fetcher
         self.state = state
@@ -92,6 +92,8 @@ class Downloader:
         # MULTI_DOWNLOADER adapter) use it to mirror live progress. All hook
         # errors are swallowed — display only.
         self.transfer_hook = transfer_hook
+        # batch_hook(total: int) fires once when a download batch starts.
+        self.batch_hook = batch_hook
         self._manifest_lock = threading.Lock()
         self._naming_lock = threading.Lock()
         self._taken_names: set[tuple[str, str]] = set()
@@ -231,6 +233,11 @@ class Downloader:
         """
         if not probes:
             return []
+        if self.batch_hook:
+            try:
+                self.batch_hook(len(probes))
+            except Exception:
+                pass
         results: list[DownloadResult] = []
         done = 0
         with ThreadPoolExecutor(max_workers=min(self.cfg.workers, len(probes))) as pool:

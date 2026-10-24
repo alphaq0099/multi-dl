@@ -120,7 +120,7 @@ class AnyPicBackend(BaseBackend):
         """Bridges the anypic_dl config section + task options into engine Config."""
         overrides: Dict[str, Any] = {
             "output_dir": str(task.output_dir),
-            "data_dir": ANYPIC_DATA_DIR,
+            "data_dir": str(self.config.get("data_dir") or ANYPIC_DATA_DIR),
             "gallery_dl": {"enabled": False},
             # The dispatcher already nests us under downloads/anypic-dl/<host>/;
             # the engine's own domain layer would duplicate it.
@@ -156,40 +156,43 @@ class AnyPicBackend(BaseBackend):
     def _make_progress_hooks(self, progress_callback):
         """Maps engine events into MULTI_DOWNLOADER DownloadProgress updates.
 
-        probe(done, total) fires once per resolved image group; transfer(info,
-        delta, done) fires per downloaded chunk and once per finished file.
-        Both run on engine worker threads, so all state is lock-guarded.
+        The slot renderer shows: bar% and the "n/m files" counter from
+        completed_files/total_files, per-file bytes from the file_* fields,
+        speed, and the current filename. probe(done, total) drives both during
+        the probing stage; batch(total) announces the transfer batch size;
+        transfer(info, delta, done) fires per downloaded chunk and once per
+        finished file. All run on engine worker threads — state is guarded.
         """
         lock = threading.Lock()
         state = {
-            "files": {},   # url -> {"done": int, "total": int}
+            "files": {},      # url -> {"done": int, "total": int}
             "bytes": 0,
             "speed": None,
+            "completed": 0,   # finished files this batch
+            "batch_total": None,
             "_last_t": None,
             "_last_bytes": 0,
         }
 
-        def _emit(phase, message, file_name=None, file_done=None, file_total=None):
+        def _emit(**kwargs):
             try:
-                progress_callback(DownloadProgress(
-                    phase=phase,
-                    status_message=message,
-                    downloaded_bytes=state["bytes"] or None,
-                    speed_bytes_sec=state["speed"],
-                    current_file=file_name,
-                    file_name=file_name,
-                    file_downloaded_bytes=file_done,
-                    file_total_bytes=file_total,
-                ))
+                progress_callback(DownloadProgress(**kwargs))
             except Exception:
                 pass
 
         def probe(done, total):
             if not progress_callback:
                 return
-            message = f"Probing originals ({done}/{total})" if total else "Probing originals"
             with lock:
-                _emit('resolving', message, file_done=done, file_total=total)
+                _emit(phase='resolving', status_message=f"Probing originals ({done}/{total})",
+                      file_index=done, total_files=total, completed_files=done)
+
+        def batch(total):
+            if not progress_callback:
+                return
+            with lock:
+                state["batch_total"] = total
+                state["completed"] = 0
 
         def transfer(info, delta, done=False):
             if not progress_callback:
@@ -198,8 +201,10 @@ class AnyPicBackend(BaseBackend):
                 f = state["files"].setdefault(info.url, {"done": 0, "total": int(info.length or 0)})
                 f["done"] += max(0, delta)
                 state["bytes"] += max(0, delta)
-                if done and f["total"]:
-                    f["done"] = max(f["done"], f["total"])
+                if done:
+                    state["completed"] += 1
+                    if f["total"]:
+                        f["done"] = max(f["done"], f["total"])
 
                 now = time.monotonic()
                 if delta > 0:
@@ -213,10 +218,22 @@ class AnyPicBackend(BaseBackend):
                             state["_last_t"], state["_last_bytes"] = now, state["bytes"]
 
                 name = unquote(urlsplit(info.url).path.rsplit("/", 1)[-1]) or "image"
-                _emit('downloading', name, file_name=name,
-                      file_done=f["done"], file_total=f["total"] or None)
+                batch_total = state["batch_total"]
+                _emit(
+                    phase='downloading',
+                    status_message=name,
+                    current_file=name,
+                    file_name=name,
+                    file_downloaded_bytes=f["done"],
+                    file_total_bytes=f["total"] or None,
+                    downloaded_bytes=state["bytes"] or None,
+                    speed_bytes_sec=state["speed"],
+                    completed_files=state["completed"],
+                    total_files=batch_total,
+                    file_index=(state["completed"] + 1) if batch_total else None,
+                )
 
-        return probe, transfer
+        return probe, batch, transfer
 
     async def download(
         self,
@@ -232,7 +249,7 @@ class AnyPicBackend(BaseBackend):
                 status_message='Fetching page',
             ))
 
-        probe_hook, transfer_hook = self._make_progress_hooks(progress_callback)
+        probe_hook, batch_hook, transfer_hook = self._make_progress_hooks(progress_callback)
         cfg = self._build_anypic_config(task, probe_hook=probe_hook)
 
         def _run() -> PageResult:
@@ -240,7 +257,8 @@ class AnyPicBackend(BaseBackend):
             resolver = Resolver(cfg, fetcher)
             state = StateStore(cfg.state_db)
             try:
-                downloader = Downloader(cfg, fetcher, state, transfer_hook=transfer_hook)
+                downloader = Downloader(cfg, fetcher, state,
+                                        transfer_hook=transfer_hook, batch_hook=batch_hook)
                 return _anypic_process_url(
                     task.url, cfg, fetcher, downloader, resolver,
                     use_gallery_dl=False,

@@ -49,8 +49,9 @@ def is_direct_image(url: str, fetcher: Fetcher) -> bool:
 
 
 def _resolve_groups(groups: dict[str, list[ImageCandidate]], resolver: Resolver,
-                    referer: str, workers: int):
+                    referer: str, workers: int, cfg: Config | None = None):
     resolved = []
+    hook = cfg.get("progress_hook") if cfg is not None else None
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
                   BarColumn(), TextColumn("{task.completed}/{task.total}"),
                   TimeElapsedColumn(), console=_report.console, transient=True) as prog:
@@ -66,6 +67,11 @@ def _resolve_groups(groups: dict[str, list[ImageCandidate]], resolver: Resolver,
                 except Exception as e:  # noqa: BLE001
                     log.debug("resolve failed for %s: %s", futures[fut], e)
                 prog.advance(task, 1)
+                if hook:
+                    try:
+                        hook(len(resolved), len(groups))
+                    except Exception:  # noqa: BLE001
+                        log.debug("progress hook failed", exc_info=True)
     return resolved
 
 
@@ -113,7 +119,7 @@ def _process_candidates(url: str, tier: str, candidates: list[ImageCandidate], c
     )[: cfg.max_images_per_page])
     result.found = len(ordered_groups)
 
-    resolved = _resolve_groups(ordered_groups, resolver, url, cfg.workers)
+    resolved = _resolve_groups(ordered_groups, resolver, url, cfg.workers, cfg)
     kept, too_small, unverified = _filter_by_size(resolved, cfg)
 
     for r in too_small:

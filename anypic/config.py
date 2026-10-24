@@ -24,6 +24,7 @@ DEFAULTS: dict[str, Any] = {
     "relaxed_keep": 3,          # how many under-min images to keep when relaxing
     "max_images_per_page": 300,
     "best_only": 0,             # >0: download only the N largest images per page
+    "layout": "domain",         # "domain" nests under <domain>/; "flat" writes into output_dir directly
     "workers": 6,
     "timeout": 30,
     "retries": 3,

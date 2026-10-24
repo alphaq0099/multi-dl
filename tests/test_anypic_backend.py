@@ -140,8 +140,92 @@ def test_config_bridge_forces_gallery_dl_off(tmp_path):
     assert cfg.best_only == 5
     assert cfg.proxy == "http://127.0.0.1:2080"
     assert cfg.gallery_dl["enabled"] is False
+    assert cfg.get("layout") == "flat"   # dispatcher already provides the host layer
     assert cfg.browser["enabled"] is True
     assert str(cfg.data_dir).endswith("data\\anypic") or str(cfg.data_dir).endswith("data/anypic")
+
+
+def test_progress_hooks_emit_updates(tmp_path):
+    """Probe and transfer events surface as DownloadProgress updates."""
+    backend = make_backend(tmp_path)
+    events = []
+    probe, transfer = backend._make_progress_hooks(events.append)
+
+    probe(2, 7)
+    assert events[-1].phase == 'resolving'
+    assert '2/7' in events[-1].status_message
+
+    class FakeInfo:
+        url = "https://cdn.example/img.jpg"
+        length = 100
+
+    transfer(FakeInfo(), 40)
+    transfer(FakeInfo(), 60)
+    transfer(FakeInfo(), 0, done=True)
+    last = events[-1]
+    assert last.phase == 'downloading'
+    assert last.file_name == "img.jpg"
+    assert last.file_downloaded_bytes == 100
+    assert last.file_total_bytes == 100
+
+
+def test_transfer_hook_fires_from_engine_downloader(tmp_path):
+    """The real Downloader calls transfer_hook per chunk and once when done."""
+    from anypic.config import load_config as anypic_load_config
+    from anypic.downloader import Downloader
+    from anypic.models import ProbeInfo
+
+    class _Store:
+        def get_by_url(self, url):
+            return None
+
+        def get_by_md5(self, md5):
+            return None
+
+        def record(self, *a):
+            pass
+
+    class _Fetch:
+        def download_file(self, url, dest, referer=None, max_bytes=None, on_progress=None):
+            dest.write_bytes(b"x" * 50)
+            if on_progress:
+                on_progress(25)
+                on_progress(25)
+            return Path(dest), 50, "deadbeef"
+
+    cfg = anypic_load_config(overrides={
+        "output_dir": str(tmp_path / "out"),
+        "data_dir": str(tmp_path / "data"),
+        "layout": "flat",
+        "dedup": False,
+    }, project_root=tmp_path)
+
+    hook_events = []
+    dl = Downloader(cfg, fetcher=_Fetch(), state=_Store(),
+                    transfer_hook=lambda info, delta, done=False: hook_events.append((info.url, delta, done)))
+    info = ProbeInfo(url="https://cdn.example/pic.jpg", ok=True, content_type="image/jpeg",
+                     width=600, height=600, length=50)
+
+    class _FetchBytes:
+        def fetch_bytes(self, url, referer=None, max_bytes=None):
+            return _make_probe_bytes()
+
+    results = dl.download_many("https://page.example/post", [info])
+    assert len(results) == 1 and results[0].status == "downloaded"
+    deltas = [e for e in hook_events if e[2] is False]
+    dones = [e for e in hook_events if e[2] is True]
+    assert sum(d for _, d, _ in deltas) == 50
+    assert len(dones) == 1 and dones[0][0] == info.url
+    # flat layout: file written directly under output_dir, no domain folder
+    assert (tmp_path / "out" / "pic.jpg").exists()
+
+
+def _make_probe_bytes() -> bytes:
+    import io as _io
+    from PIL import Image as _Image
+    buf = _io.BytesIO()
+    _Image.new("RGB", (600, 600)).save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 def test_config_bridge_disables_browser(tmp_path):

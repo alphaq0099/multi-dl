@@ -81,11 +81,17 @@ class StateStore:
 
 
 class Downloader:
-    def __init__(self, cfg: Config, fetcher: Fetcher, state: StateStore, progress=None):
+    def __init__(self, cfg: Config, fetcher: Fetcher, state: StateStore, progress=None,
+                 transfer_hook=None):
         self.cfg = cfg
         self.fetcher = fetcher
         self.state = state
         self.progress = progress  # rich Progress task (optional)
+        # transfer_hook(info: ProbeInfo, delta: int, done: bool = False) fires
+        # per downloaded chunk and once per finished file; embedders (e.g. the
+        # MULTI_DOWNLOADER adapter) use it to mirror live progress. All hook
+        # errors are swallowed — display only.
+        self.transfer_hook = transfer_hook
         self._manifest_lock = threading.Lock()
         self._naming_lock = threading.Lock()
         self._taken_names: set[tuple[str, str]] = set()
@@ -145,7 +151,12 @@ class Downloader:
                 res.width, res.height, res.bytes = existing["width"], existing["height"], existing["bytes"]
                 return res
 
-        directory = self.cfg.output_dir / _domain_dir(page_url)
+        # layout "domain" nests under a per-domain folder (standalone default);
+        # "flat" writes straight into output_dir — for embedders whose host
+        # layer is already provided by the orchestrating dispatcher.
+        directory = self.cfg.output_dir
+        if (self.cfg.get("layout") or "domain") != "flat":
+            directory = directory / _domain_dir(page_url)
         if sub_dir:
             # one folder per source page keeps different links' files apart
             directory = directory / sub_dir
@@ -230,10 +241,17 @@ class Downloader:
                     name = unquote(urlsplit(p.url).path).rsplit("/", 1)[-1][:32] or "image"
                     sub = progress.add_task(escape(name), total=(p.length or None))
 
-                    def _cb(delta, _sub=sub):
-                        progress.advance(_sub, delta)
-                        if task_id is not None:
-                            progress.advance(task_id, delta)
+                if progress is not None or self.transfer_hook:
+                    def _cb(delta, _sub=sub, _p=p):
+                        if _sub is not None:
+                            progress.advance(_sub, delta)
+                            if task_id is not None:
+                                progress.advance(task_id, delta)
+                        if self.transfer_hook:
+                            try:
+                                self.transfer_hook(_p, delta)
+                            except Exception:
+                                pass
 
                     cb = _cb
                 futures[pool.submit(self._download_one, page_url, p, cb, sub_dir)] = (p, sub)
@@ -244,6 +262,11 @@ class Downloader:
                 except Exception as e:  # noqa: BLE001
                     res = DownloadResult(url=p.url, status="failed", note=str(e)[:200])
                 results.append(res)
+                if self.transfer_hook:
+                    try:
+                        self.transfer_hook(p, 0, done=True)
+                    except Exception:
+                        pass
                 if progress is not None:
                     if sub is not None:
                         progress.remove_task(sub)

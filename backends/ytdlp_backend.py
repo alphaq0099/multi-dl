@@ -168,7 +168,8 @@ class YtDlpBackend(BaseBackend):
 
         return None
 
-    def can_handle(self, url: str) -> bool:
+    @staticmethod
+    def can_handle(url: str) -> bool:
         """Check if yt-dlp has an extractor capable of handling this URL."""
         # Yield Telegram URLs exclusively to telegram-dl backend
         url_lower = url.lower()

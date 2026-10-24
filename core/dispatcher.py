@@ -142,16 +142,41 @@ class QueueDispatcher:
             try:
                 entry = await self._download_with_limits(backend_instance, task, _progress_cb)
             except Exception:
-                alternate = {'gallery-dl': 'cyberdrop-dl', 'cyberdrop-dl': 'gallery-dl'}.get(backend_instance.name)
+                if task.options.get('_is_failover'):
+                    raise  # already a failover attempt; never chain further
+                # Engine failover chain, tried in order; each candidate must be
+                # registered, enabled for the failing engine, and must itself
+                # claim the URL (can_handle) before it is used.
+                failover_chain = {
+                    'gallery-dl': ('cyberdrop-dl', 'anypic-dl'),
+                    'cyberdrop-dl': ('gallery-dl', 'anypic-dl'),
+                    'yt-dlp': ('anypic-dl',),
+                    'anypic-dl': ('yt-dlp',),
+                }.get(backend_instance.name, ())
                 backends = getattr(self.router, 'backends', {})
-                fallback = backends.get(alternate) if alternate else None
-                setting = 'enable_failover_to_cyberdrop' if alternate == 'cyberdrop-dl' else 'enable_failover_to_gallerydl'
                 backend_config = getattr(backend_instance, 'config', {})
-                if fallback is None or not backend_config.get(setting, True) or not fallback.can_handle(item.url):
+                fallback = None
+                for alternate in failover_chain:
+                    candidate = backends.get(alternate)
+                    setting = {
+                        'cyberdrop-dl': 'enable_failover_to_cyberdrop',
+                        'gallery-dl': 'enable_failover_to_gallerydl',
+                        'anypic-dl': 'enable_failover_to_anypic',
+                    }.get(alternate)
+                    if candidate is None or not backend_config.get(setting, True):
+                        continue
+                    try:
+                        if not candidate.can_handle(item.url):
+                            continue
+                    except Exception:
+                        continue
+                    fallback = candidate
+                    break
+                if fallback is None:
                     raise
-                task.backend = alternate
+                task.backend = fallback.name
                 task.options['_is_failover'] = True
-                _progress_cb(DownloadProgress(phase='waiting', status_message=f'Waiting for {alternate} fallback worker'))
+                _progress_cb(DownloadProgress(phase='waiting', status_message=f'Waiting for {fallback.name} fallback worker'))
                 entry = await self._download_with_limits(fallback, task, _progress_cb)
 
             raw_path = Path(entry.file_path)

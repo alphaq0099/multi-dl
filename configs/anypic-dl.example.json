@@ -16,5 +16,7 @@
   "// URL+content-hash deduplication via data/anypic/state.sqlite": "",
   "dedup": true,
   "// Playwright browser fallback for JS-only / lazy-load pages (requires: pip install playwright && playwright install chromium)": "",
-  "browser_enabled": true
+  "browser_enabled": true,
+  "// Route unknown pages (no gallery-dl/yt-dlp extractor, not in the domain map) to anypic-dl instead of yt-dlp's generic fallback": "",
+  "handle_unknown_pages": true
 }

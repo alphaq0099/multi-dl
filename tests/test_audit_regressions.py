@@ -501,3 +501,122 @@ async def test_cyberdrop_cancellation_terminates_subprocess(tmp_path, monkeypatc
         await task
     proc.terminate.assert_called_once()
     proc.wait.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_fails_over_ytdlp_to_anypic(tmp_path):
+    """The yt-dlp → anypic-dl arm: unknown-page failures get retried by the
+    generic image engine."""
+    from core.dispatcher import QueueDispatcher
+    from core.gui_tracker import GuiMultiBarTracker
+    config = ConfigManager(tmp_path / 'config.json')
+    config.set('archive', 'enabled', False)
+    queue = QueueManager(tmp_path / 'queue.json')
+    queue.add('https://random-page.example/post', backend='yt-dlp')
+
+    used = []
+
+    class Primary:
+        name = 'yt-dlp'
+        config = {}
+        async def download(self, task, progress_callback=None):
+            raise DownloadFailedError('Unsupported URL')
+
+    class AnyPic:
+        name = 'anypic-dl'
+        def can_handle(self, url):
+            return True
+        async def download(self, task, progress_callback=None):
+            used.append(task.backend)
+            return ArchiveEntry(url=task.url, backend=self.name,
+                                file_path=str(tmp_path / 'p'), file_name='p', file_size=1)
+
+    primary, anypic = Primary(), AnyPic()
+    router = SimpleNamespace(route=lambda *a, **k: primary,
+                             backends={'yt-dlp': primary, 'anypic-dl': anypic})
+    dispatcher = QueueDispatcher(config, queue, ArchiveManager(tmp_path / 'archive.db'), router)
+    result = await dispatcher.run(concurrency=1, tracker=GuiMultiBarTracker(), quiet=True)
+    assert result.succeeded_count == 1
+    assert used == ['anypic-dl']
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_failover_skips_unwilling_candidates(tmp_path):
+    """gallery-dl failure: cyberdrop-dl declines (can_handle False) so the
+    chain proceeds to anypic-dl instead of giving up."""
+    from core.dispatcher import QueueDispatcher
+    from core.gui_tracker import GuiMultiBarTracker
+    config = ConfigManager(tmp_path / 'config.json')
+    config.set('archive', 'enabled', False)
+    queue = QueueManager(tmp_path / 'queue.json')
+    queue.add('https://random-page.example/photos', backend='gallery-dl')
+
+    used = []
+
+    class Primary:
+        name = 'gallery-dl'
+        config = {}
+        async def download(self, task, progress_callback=None):
+            raise DownloadFailedError('no extractor')
+
+    class Cyberdrop:
+        name = 'cyberdrop-dl'
+        def can_handle(self, url):
+            return False
+        async def download(self, task, progress_callback=None):
+            used.append('cyberdrop-dl')
+            raise AssertionError('must not be used')
+
+    class AnyPic:
+        name = 'anypic-dl'
+        def can_handle(self, url):
+            return True
+        async def download(self, task, progress_callback=None):
+            used.append('anypic-dl')
+            return ArchiveEntry(url=task.url, backend=self.name,
+                                file_path=str(tmp_path / 'q'), file_name='q', file_size=1)
+
+    primary = Primary()
+    router = SimpleNamespace(route=lambda *a, **k: primary,
+                             backends={'gallery-dl': primary, 'cyberdrop-dl': Cyberdrop(),
+                                       'anypic-dl': AnyPic()})
+    dispatcher = QueueDispatcher(config, queue, ArchiveManager(tmp_path / 'archive.db'), router)
+    result = await dispatcher.run(concurrency=1, tracker=GuiMultiBarTracker(), quiet=True)
+    assert result.succeeded_count == 1
+    assert used == ['anypic-dl']
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_failover_never_chains_twice(tmp_path):
+    """A failing fallback must not trigger a second-level failover."""
+    from core.dispatcher import QueueDispatcher
+    from core.gui_tracker import GuiMultiBarTracker
+    config = ConfigManager(tmp_path / 'config.json')
+    config.set('archive', 'enabled', False)
+    queue = QueueManager(tmp_path / 'queue.json')
+    queue.add('https://random-page.example/post', backend='yt-dlp')
+
+    attempts = []
+
+    class YtDlp:
+        name = 'yt-dlp'
+        config = {}
+        async def download(self, task, progress_callback=None):
+            attempts.append('yt-dlp')
+            raise DownloadFailedError('Unsupported URL')
+
+    class AnyPic:
+        name = 'anypic-dl'
+        def can_handle(self, url):
+            return True
+        async def download(self, task, progress_callback=None):
+            attempts.append('anypic-dl')
+            raise DownloadFailedError('no images found')
+
+    primary, anypic = YtDlp(), AnyPic()
+    router = SimpleNamespace(route=lambda *a, **k: primary,
+                             backends={'yt-dlp': primary, 'anypic-dl': anypic})
+    dispatcher = QueueDispatcher(config, queue, ArchiveManager(tmp_path / 'archive.db'), router)
+    result = await dispatcher.run(concurrency=1, tracker=GuiMultiBarTracker(), quiet=True)
+    assert result.failed_count == 1
+    assert attempts == ['yt-dlp', 'anypic-dl']  # exactly one failover, no chain

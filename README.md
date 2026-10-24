@@ -69,7 +69,21 @@
 
 1. **Tier 1 — Domain Matching:** Fast Regex map routes URLs to their optimal engine.
 2. **Tier 2 — Locker Prioritization:** Common file lockers default to `gallery-dl` for clean single-file downloads and reliable extraction.
-3. **Tier 3 — Bidirectional Automatic Failover:** If `gallery-dl` encounters an unsupported forum thread or structure variation, the task seamlessly falls back to `cyberdrop-dl`. If `cyberdrop-dl` fails, it falls back to `gallery-dl`.
+3. **Tier 3 — Unknown-Page Routing:** Pages with no gallery-dl/yt-dlp extractor and no domain-map entry route to `anypic-dl`, the generic image engine that resolves original-resolution images (disable via `anypic_dl.handle_unknown_pages=false`).
+4. **Tier 4 — Automatic Failover Chain:** `gallery-dl` ⇄ `cyberdrop-dl` → `anypic-dl`, plus `yt-dlp` → `anypic-dl` for unsupported URLs (one level deep, never chained).
+
+### Engine Ownership Matrix
+
+| Engine | Owns | Examples |
+| --- | --- | --- |
+| `yt-dlp` | Video/audio streaming sites with native extractors, direct media files | YouTube, Twitch, Vimeo, SoundCloud, Rumble, `*.mp4` links |
+| `gallery-dl` | Image boards, social galleries, native-extractor lockers/forums | Twitter/X, Reddit, Pixiv, Instagram, Imgur, Danbooru, nhentai, Bunkr, Erome, Coomer/Kemono, Catbox, XenForo forums |
+| `cyberdrop-dl` | Locker/forum crawling beyond gallery-dl's extractors | hotpic.cc, saint.to, F95zone, mega.nz, sendvid, streamtape, puter |
+| `anypic-dl` | Everything image-bearing with no other owner — unknown pages, direct images gallery-dl can't claim | random blogs, `.jpg` links on unknown hosts, JS-heavy image pages (Playwright optional) |
+| `telegram-dl` | Telegram channels/chats/topics | `t.me/...` |
+| `terabox-dl` | TeraBox family shares | terabox.com, 1024tera, teraboxlink, mirrors |
+
+When several engines could claim a URL, the more specific one wins: extractor-backed `gallery-dl` over heuristic matches, `yt-dlp`'s registry over the anypic fallback, and `anypic-dl` last by design — it only takes what nothing else wanted.
 
 ---
 

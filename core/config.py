@@ -187,6 +187,7 @@ class ConfigManager:
             "retries": 3,
             "dedup": True,
             "browser_enabled": True,
+            "handle_unknown_pages": True,
             "config_file": "configs/anypic-dl.json",
         },
     }

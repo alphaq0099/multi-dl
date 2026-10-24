@@ -47,9 +47,34 @@ def test_detect_backend_name_known_patterns():
 
 
 def test_detect_backend_name_unknown_falls_back_to_ytdlp():
-    # Unknown site defaults to yt-dlp as universal fallback extractor
+    # Direct video files on unknown hosts stay with yt-dlp
     detected = URLRouter.detect_backend_name("https://some-unrecognized-domain.org/media/video.mp4")
     assert detected == "yt-dlp"
+
+
+def test_detect_backend_name_unknown_pages_fall_back_to_anypic(monkeypatch):
+    # Pages unknown to gallery-dl AND yt-dlp route to the generic image engine
+    monkeypatch.setattr(URLRouter, "_unknown_url_engine", classmethod(lambda cls: "anypic-dl"))
+    assert URLRouter.detect_backend_name("https://some-random-blog.example/post") == "anypic-dl"
+
+
+def test_detect_backend_name_unknown_pages_can_revert_to_ytdlp(monkeypatch):
+    # anypic_dl.handle_unknown_pages=false restores the old yt-dlp fallback
+    monkeypatch.setattr(URLRouter, "_unknown_url_engine", classmethod(lambda cls: "yt-dlp"))
+    assert URLRouter.detect_backend_name("https://some-random-blog.example/post") == "yt-dlp"
+
+
+def test_detect_backend_name_ytdlp_registry_sites_stay_with_ytdlp():
+    # Streaming sites with a native yt-dlp extractor (not in DOMAIN_MAP)
+    # must not be stolen by the anypic fallback.
+    assert URLRouter.detect_backend_name("https://rumble.com/vabcdef-example.html") == "yt-dlp"
+
+
+def test_detect_backend_name_direct_image_without_gallery_extractor(monkeypatch):
+    # A bare image link that gallery-dl cannot claim goes to anypic-dl
+    import gallery_dl.extractor as gdl_ext
+    monkeypatch.setattr(gdl_ext, "find", lambda url: None)
+    assert URLRouter.detect_backend_name("https://cdn.examplexyz.test/img/pic.jpg") == "anypic-dl"
 
 
 # ---------------------------------------------------------------------------

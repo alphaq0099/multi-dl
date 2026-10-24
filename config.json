@@ -117,6 +117,7 @@
         "retries": 3,
         "dedup": true,
         "browser_enabled": true,
-        "config_file": "configs/anypic-dl.json"
+        "config_file": "configs/anypic-dl.json",
+        "handle_unknown_pages": true
     }
 }

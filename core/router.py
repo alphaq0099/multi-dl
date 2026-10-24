@@ -255,7 +255,40 @@ class URLRouter:
         if any(img in domain for img in ("image", "photo", "pic", "gallery", "album", "danbooru", "gelbooru")):
             return "gallery-dl"
 
-        return "yt-dlp"
+        # Streaming sites with a native yt-dlp extractor (not in DOMAIN_MAP):
+        # they stay with yt-dlp even though they are "unknown" to the map.
+        try:
+            from backends.ytdlp_backend import YtDlpBackend
+            if YtDlpBackend.can_handle(url):
+                return "yt-dlp"
+        except Exception:
+            pass
+
+        # Direct image links that no gallery-dl extractor claims: the generic
+        # image engine owns them (original-resolution fetch, no album logic).
+        if any(path_lower.endswith(i_ext) for i_ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif", ".tiff")):
+            return "anypic-dl"
+
+        # Truly unknown pages: anypic-dl probes for original-resolution images
+        # (config-gated; set anypic_dl.handle_unknown_pages=false to restore
+        # the old yt-dlp generic fallback).
+        return cls._unknown_url_engine()
+
+    _cached_unknown_engine: Optional[str] = None
+
+    @classmethod
+    def _unknown_url_engine(cls) -> str:
+        """Resolves (once per process) which engine owns unknown URLs."""
+        if cls._cached_unknown_engine is None:
+            engine = "anypic-dl"
+            try:
+                from core.config import ConfigManager
+                if not ConfigManager().get("anypic_dl", "handle_unknown_pages", True):
+                    engine = "yt-dlp"
+            except Exception:
+                pass
+            cls._cached_unknown_engine = engine
+        return cls._cached_unknown_engine
 
     @classmethod
     def create_default(cls, config: Optional[Any] = None) -> "URLRouter":

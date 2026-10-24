@@ -53,7 +53,7 @@ def _resolve_groups(groups: dict[str, list[ImageCandidate]], resolver: Resolver,
     resolved = []
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
                   BarColumn(), TextColumn("{task.completed}/{task.total}"),
-                  TimeElapsedColumn(), console=console, transient=True) as prog:
+                  TimeElapsedColumn(), console=_report.console, transient=True) as prog:
         task = prog.add_task("Probing originals…", total=len(groups))
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {
@@ -134,7 +134,7 @@ def _process_candidates(url: str, tier: str, candidates: list[ImageCandidate], c
     # whose speed is measured on actual bytes transferred
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
                   BarColumn(bar_width=None), TransferSpeedColumn(), TimeElapsedColumn(),
-                  console=console, transient=True) as prog:
+                  console=_report.console, transient=True) as prog:
         task = prog.add_task(f"Downloading {len(probes)} file(s)…", total=None)
         result.results.extend(
             downloader.download_many(url, probes, task_id=task, progress=prog, sub_dir=sub_dir))

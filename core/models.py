@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
+import uuid
 
 
 class TaskStatus(str, Enum):
@@ -84,9 +85,6 @@ class QueueItem:
     status: TaskStatus = TaskStatus.QUEUED
     added_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     error_message: Optional[str] = None
-
-
-import uuid
 
 
 @dataclass

@@ -1302,7 +1302,7 @@ def main():
             ok, msg = updater.update_self()
             print(f"MULTI_DOWNLOADER: {msg}")
         else:
-            print(f"{Style.tag('❌', 'UNKNOWN', Style.RED)} Unknown engine '{target}'. Use: yt-dlp, gallery-dl, terabox-dl, telegram-dl, cyberdrop-dl, curl_cffi, or all.")
+            print(f"{Style.tag('❌', 'UNKNOWN', Style.RED)} Unknown engine '{target}'. Use: yt-dlp, gallery-dl, terabox-dl, telegram-dl, cyberdrop-dl, multi-dl (this app), curl_cffi (network package), or all.")
         return
 
     # Version flag check

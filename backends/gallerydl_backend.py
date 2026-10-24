@@ -690,6 +690,13 @@ class GalleryDlBackend(BaseBackend):
         except Exception:
             return False
 
+    def _failover_cyberdrop(self) -> "CyberdropDlBackend":
+        """Failover instance that keeps this backend's proxy/network settings."""
+        from backends.cyberdrop_backend import CyberdropDlBackend
+        settings = {k: v for k, v in self.config.items()
+                    if k in ('proxy', 'timeout', 'user_agent', 'cookies_from_browser', 'cookies_file')}
+        return CyberdropDlBackend(settings)
+
     async def extract_info(self, url: str) -> Dict[str, Any]:
         return await run_gallery_process(self.config, 'info', url=url)
 
@@ -735,8 +742,7 @@ class GalleryDlBackend(BaseBackend):
                                               progress_callback=progress_callback)
         except DownloadFailedError:
             if self.config.get('enable_failover_to_cyberdrop', True) and not task.options.get('_is_failover') and not task.options.get('_managed_failover'):
-                from backends.cyberdrop_backend import CyberdropDlBackend
-                backend = CyberdropDlBackend()
+                backend = self._failover_cyberdrop()
                 if backend.can_handle(task.url):
                     from dataclasses import replace
                     fallback = replace(task, backend=backend.name, options=dict(task.options, _is_failover=True))
@@ -854,8 +860,7 @@ class GalleryDlBackend(BaseBackend):
                 # ── Automatic Failover to cyberdrop-dl ──
                 if self.config.get("enable_failover_to_cyberdrop", True) and not task.options.get("_is_failover") and not task.options.get("_managed_failover"):
                     try:
-                        from backends.cyberdrop_backend import CyberdropDlBackend
-                        cdl = CyberdropDlBackend()
+                        cdl = self._failover_cyberdrop()
                         is_no_extractor = "NoExtractorError" in type(e).__name__ or str(e) in ("None", "")
                         if cdl.can_handle(task.url) or is_no_extractor:
                             err_hint = "no extractor" if is_no_extractor else str(e)

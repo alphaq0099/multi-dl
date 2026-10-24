@@ -251,9 +251,9 @@ class QueueDispatcher:
 
         try:
             raw_limits = getattr(self.config, "engine_limits", None)
-            engine_limits = dict(raw_limits) if isinstance(raw_limits, dict) else {"yt-dlp": 2, "telegram-dl": 1}
+            engine_limits = dict(raw_limits) if isinstance(raw_limits, dict) else dict(QueueManager.DEFAULT_ENGINE_LIMITS)
         except Exception:
-            engine_limits = {"yt-dlp": 2, "telegram-dl": 1}
+            engine_limits = dict(QueueManager.DEFAULT_ENGINE_LIMITS)
 
         max_yt = engine_limits.get("yt-dlp", 2)
         max_tg = engine_limits.get("telegram-dl", 1)

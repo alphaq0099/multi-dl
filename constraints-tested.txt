@@ -4,8 +4,6 @@ yt-dlp==2026.8.19
 gallery-dl==1.32.16
 telethon==1.45.0
 flet==0.28.3
-customtkinter==6.0.0
-tqdm==4.70.1
 pillow==12.3.0
 python-dotenv==1.2.4
 requests==2.34.2

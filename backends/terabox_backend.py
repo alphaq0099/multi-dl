@@ -77,6 +77,11 @@ def _get_safe_filename(name: Optional[str]) -> str:
     return safe_name(name)
 
 
+def _default_modular_config_path() -> Path:
+    """The stock modular config path; overridden in tests to avoid touching real files."""
+    return Path(__file__).resolve().parent.parent / 'configs' / 'terabox-dl.json'
+
+
 def _detect_media_type(filename: str) -> MediaType:
     ext = Path(filename).suffix.lower()
     if ext in (".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m4v"):
@@ -284,6 +289,7 @@ class TeraboxDlBackend(BaseBackend):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         self._cached_js_token: Optional[str] = None
+        self._ndus_warning: Optional[str] = None
         self._load_modular_config()
 
     def _load_modular_config(self) -> None:
@@ -336,6 +342,13 @@ class TeraboxDlBackend(BaseBackend):
             return raw
         raise DownloadFailedError(f"Could not extract TeraBox share key from URL: {url}")
 
+    MIN_NDUS_LENGTH = 32  # real ndus cookies are 40+ chars; test/placeholder values are far shorter
+
+    @classmethod
+    def _looks_like_ndus(cls, value: str) -> bool:
+        """Rejects placeholder/truncated cookie values before they can poison a session."""
+        return len(str(value or "").strip()) >= cls.MIN_NDUS_LENGTH
+
     def _resolve_ndus_cookie(self, task_options: Optional[Dict[str, Any]] = None) -> str:
         """
         Resolves the ndus cookie from:
@@ -343,16 +356,41 @@ class TeraboxDlBackend(BaseBackend):
         2. Config ndus_cookie
         3. Environment variable TERABOX_NDUS
         4. .env file in user repo (~/Terabox-dl/.env) or project root
+
+        Implausibly short values are skipped (with a recorded warning) instead of
+        silently producing 403 failures at the CDN; an explicit --ndus override that
+        fails the check raises immediately.
         """
+        self._ndus_warning = None
+
+        def _usable(raw: Any, source: str) -> Optional[str]:
+            value = str(raw or "").strip()
+            if not value:
+                return None
+            if self._looks_like_ndus(value):
+                return value
+            self._ndus_warning = (
+                f"Ignoring implausibly short ndus cookie from {source} "
+                f"({len(value)} chars; real cookies are 40+)"
+            )
+            return None
+
         if task_options and task_options.get("ndus"):
-            return str(task_options["ndus"]).strip()
+            value = str(task_options["ndus"]).strip()
+            if not self._looks_like_ndus(value):
+                raise AuthenticationError(
+                    f"The --ndus cookie provided looks invalid ({len(value)} chars; "
+                    f"real ndus cookies are 40+ characters)."
+                )
+            return value
 
-        if self.config.get("ndus_cookie"):
-            return str(self.config["ndus_cookie"]).strip()
+        value = _usable(self.config.get("ndus_cookie"), "backend config")
+        if value:
+            return value
 
-        env_val = os.getenv("TERABOX_NDUS")
-        if env_val:
-            return env_val.strip()
+        value = _usable(os.getenv("TERABOX_NDUS"), "the TERABOX_NDUS environment variable")
+        if value:
+            return value
 
         custom_env = self.config.get("env_file")
         candidate_envs = [
@@ -366,19 +404,45 @@ class TeraboxDlBackend(BaseBackend):
                 try:
                     load_dotenv(p)
                     val = os.getenv("TERABOX_NDUS") or os.getenv("TERABOX_NDUS_COOKIE")
-                    if val:
-                        return val.strip()
+                    value = _usable(val, str(p.name))
+                    if value:
+                        return value
                 except Exception:
                     pass
 
         return ""
 
     def _save_modular_config(self) -> None:
-        """Save credentials atomically without rewriting an unrelated .env file."""
+        """Save credentials without writing secrets into the default modular file.
+
+        Default layout: the cookie goes to the ignored master secret store
+        (config.secrets.json) and any legacy value in configs/terabox-dl.json is
+        blanked so only one credential copy remains on disk. A custom
+        ``config_file`` keeps receiving the cookie directly, since the user
+        explicitly chose that location.
+        """
         project_root = Path(__file__).resolve().parent.parent
         path = Path(self.config.get('config_file', 'configs/terabox-dl.json'))
         if not path.is_absolute():
             path = project_root / path
+        is_default_layout = path.resolve() == _default_modular_config_path().resolve()
+
+        if is_default_layout:
+            from core.config import ConfigManager
+            master = ConfigManager()
+            for key in ('ndus_cookie',):
+                if key in self.config:
+                    master.set('terabox_dl', key, self.config[key])
+            try:
+                current = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+                if isinstance(current, dict) and current.get('ndus_cookie'):
+                    current['ndus_cookie'] = ""
+                    with file_lock(path):
+                        atomic_json_write(path, current)
+            except (OSError, ValueError, TypeError):
+                pass  # non-fatal: the secret store already holds the value
+            return
+
         with file_lock(path):
             try:
                 current = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
@@ -390,32 +454,43 @@ class TeraboxDlBackend(BaseBackend):
                 atomic_json_write(path, current)
             except (OSError, ValueError, TypeError) as exc:
                 raise ConfigError('Could not save terabox credentials; existing configuration was preserved') from exc
-        if path.resolve() == (project_root / 'configs' / 'terabox-dl.json').resolve():
-            # The application master store has precedence over .env fallbacks.
-            from core.config import ConfigManager
-            master = ConfigManager()
-            for key in ('ndus_cookie',):
-                if key in self.config:
-                    master.set('terabox_dl', key, self.config[key])
 
     def _prompt_ndus_cookie(self, reason: str = "") -> str:
         """Interactively prompts the user for their TeraBox NDUS cookie."""
-        existing = self.config.get("ndus_cookie") or self._resolve_ndus_cookie()
+        if not Style.is_interactive():
+            raise AuthenticationError(
+                "TeraBox requires an ndus cookie; run 'python multi-dl.py auth terabox' "
+                "in an interactive terminal to configure it."
+            )
+        raw_existing = str(self.config.get("ndus_cookie") or "").strip()
+        existing = raw_existing if self._looks_like_ndus(raw_existing) else self._resolve_ndus_cookie()
         print(f"\n{Style.tag('🍪', 'TERABOX AUTH', Style.CYAN)} {Style.bold('TeraBox account cookie (ndus) required.')}")
         if existing:
             masked = existing[:4] + "..." + existing[-4:] if len(existing) > 8 else "***"
             print(f"   {Style.dim(f'Current configured cookie: {masked}')}")
+        if self._ndus_warning:
+            print(f"   {Style.yellow(f'⚠ {self._ndus_warning}')}")
         if reason:
             print(f"{Style.dim(f'   Notice: {reason}')}")
         print(f"{Style.dim('   How to get your ndus cookie:')}")
         print(f"{Style.dim('   1. Log into https://www.terabox.com (or 1024tera.com) in your web browser.')}")
         print(f"{Style.dim('   2. Open Developer Tools (F12) -> Application / Storage -> Cookies -> terabox.com.')}")
-        print(f"{Style.dim('   3. Locate the cookie named \"ndus\" and copy its Value.')}\n")
+        print(f"{Style.dim('   3. Locate the cookie named \"ndus\" and copy its Value.')}")
 
         prompt_label = "Enter TeraBox ndus cookie"
         if existing:
             prompt_label += " (press Enter to keep existing)"
-        val = input(f"{Style.cyan(prompt_label + ': ')}").strip()
+        val = ""
+        for _ in range(3):
+            val = input(f"{Style.cyan(prompt_label + ': ')}").strip()
+            if not val:
+                val = ""
+                break
+            if self._looks_like_ndus(val):
+                break
+            print(f"   {Style.yellow('That value looks too short to be a real ndus cookie '
+                                f'({len(val)} chars; expected 40+). Try copying the full value.')}")
+            val = ""
         if not val:
             if existing:
                 print(f"\n{Style.tag('ℹ️', 'TERABOX', Style.DIM)} Retaining existing cookie.\n")
@@ -424,7 +499,7 @@ class TeraboxDlBackend(BaseBackend):
 
         self.config["ndus_cookie"] = val
         self._save_modular_config()
-        print(f"\n{Style.tag('💾', 'SAVED', Style.GREEN)} Cookie saved to {Style.path('configs/terabox-dl.json')}\n")
+        print(f"\n{Style.tag('💾', 'SAVED', Style.GREEN)} Cookie saved to the credential store\n")
         return val
 
     @classmethod
@@ -810,11 +885,17 @@ class TeraboxDlBackend(BaseBackend):
         out_dir = contained_path(out_dir, safe_name(short_key))
         out_dir.mkdir(parents=True, exist_ok=True)
         ndus_cookie = self._resolve_ndus_cookie(task.options)
-        if not ndus_cookie and not quiet:
-            print(f"\n{Style.tag('⚠️', 'AUTH', Style.YELLOW)} {Style.yellow('No ndus cookie provided.')}")
-            print(f"  {Style.dim('1. Add ndus_cookie to configs/terabox-dl.json')}")
-            print(f"  {Style.dim('2. Or set TERABOX_NDUS in your .env file')}")
-            print(f"  {Style.dim('3. Or pass --ndus <cookie> on CLI')}\n")
+        ndus_warning = getattr(self, "_ndus_warning", None)
+        if (not ndus_cookie or ndus_warning) and not quiet:
+            if ndus_warning:
+                print(f"\n{Style.tag('⚠️', 'AUTH', Style.YELLOW)} {Style.yellow(ndus_warning)}")
+            if not ndus_cookie:
+                print(f"{Style.tag('⚠️', 'AUTH', Style.YELLOW)} {Style.yellow('No valid ndus cookie configured.')}")
+                print(f"  {Style.dim('1. Run: python multi-dl.py auth terabox')}")
+                print(f"  {Style.dim('2. Or set TERABOX_NDUS in your .env file')}")
+                print(f"  {Style.dim('3. Or pass --ndus <cookie> on CLI')}\n")
+        if ndus_warning and progress_callback:
+            progress_callback(DownloadProgress(phase='waiting', status_message=ndus_warning[:80]))
 
         session = self._create_session(ndus_cookie)
         if task.options.get('proxy'):
@@ -953,6 +1034,8 @@ class TeraboxDlBackend(BaseBackend):
 
                 # 3. Stream download with retry
                 success = False
+                dlink_refreshed = False
+                saw_403 = False
                 for attempt in range(1, max_retries + 1):
                     try:
                         resume_pos = 0
@@ -973,6 +1056,21 @@ class TeraboxDlBackend(BaseBackend):
                         resp = session.get(dlink, headers=req_headers, stream=True, timeout=timeout)
                         try:
                             if resp.status_code not in (200, 206):
+                                if resp.status_code == 403:
+                                    saw_403 = True
+                                    if not dlink_refreshed:
+                                        # A refused dlink is often transient (rate limit or
+                                        # expiry); resolve a fresh one instead of hammering
+                                        # the same dead link for every retry.
+                                        dlink_refreshed = True
+                                        fresh = self._get_download_link(
+                                            session, fs_id, q_entry["share_id"], q_entry["uk"],
+                                            q_entry["sign"], q_entry["timestamp"], q_entry["randsk"],
+                                            api_base=info.get("api_base"),
+                                        )
+                                        if fresh:
+                                            dlink = fresh
+                                            continue
                                 resp.raise_for_status()
 
                             is_append = resp.status_code == 206
@@ -1047,7 +1145,10 @@ class TeraboxDlBackend(BaseBackend):
 
                     except Exception as err:
                         if attempt == max_retries:
-                            download_errors.append(f"{filename}: {err}")
+                            msg = f"{filename}: {err}"
+                            if saw_403:
+                                msg += " (HTTP 403: dlink refused — ndus cookie may be expired; run 'multi-dl auth terabox')"
+                            download_errors.append(msg)
                             if batch_tracker:
                                 batch_tracker.finish_file(filename, 0, skipped=True)
                         else:

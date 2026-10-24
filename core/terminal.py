@@ -180,6 +180,7 @@ class Style:
         "telegram-dl": "\033[94m",   # Telegram Blue
         "terabox-dl": "\033[96m",    # TeraBox Cyan
         "cyberdrop-dl": "\033[95m",  # Cyberdrop Magenta
+        "anypic-dl": "\033[92m",     # Anypic Green
     }
 
     @classmethod

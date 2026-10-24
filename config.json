@@ -100,10 +100,23 @@
         "telegram-dl": 1,
         "gallery-dl": 4,
         "terabox-dl": 2,
-        "cyberdrop-dl": 2
+        "cyberdrop-dl": 2,
+        "anypic-dl": 2
     },
     "domain_limits": {
         "max_per_domain": 3,
         "enabled": true
+    },
+    "anypic_dl": {
+        "min_width": 250,
+        "min_height": 250,
+        "max_images_per_page": 300,
+        "best_only": 0,
+        "workers": 6,
+        "timeout": 30,
+        "retries": 3,
+        "dedup": true,
+        "browser_enabled": true,
+        "config_file": "configs/anypic-dl.json"
     }
 }

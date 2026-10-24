@@ -259,7 +259,13 @@ class URLRouter:
 
     @classmethod
     def create_default(cls, config: Optional[Any] = None) -> "URLRouter":
-        """Instantiates all 5 production backends with configured settings and returns a fully initialized router."""
+        """Instantiates all production backends with configured settings and returns a fully initialized router.
+
+        anypic-dl registers last on purpose: Tier-2 routing consults
+        ``can_handle`` in dict order, and anypic only claims URLs no other
+        engine wanted.
+        """
+        from backends.anypic_backend import AnyPicBackend
         from backends.cyberdrop_backend import CyberdropDlBackend
         from backends.gallerydl_backend import GalleryDlBackend
         from backends.telegram_backend import TelegramDlBackend
@@ -276,6 +282,7 @@ class URLRouter:
             "telegram-dl": TelegramDlBackend(config.get_backend_config("telegram-dl")),
             "terabox-dl": TeraboxDlBackend(config.get_backend_config("terabox-dl")),
             "cyberdrop-dl": CyberdropDlBackend(config.get_backend_config("cyberdrop-dl")),
+            "anypic-dl": AnyPicBackend(config.get_backend_config("anypic-dl")),
         })
 
     @staticmethod

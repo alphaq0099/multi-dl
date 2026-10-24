@@ -138,6 +138,7 @@ ENGINE_COLORS: Dict[str, str] = {
     "telegram-dl": ACCENT_BLUE,
     "terabox-dl": ACCENT_CYAN,
     "cyberdrop-dl": ACCENT_MAGENTA,
+    "anypic-dl": ACCENT_GREEN,
     "auto": "#9E9E9E",
 }
 
@@ -987,6 +988,7 @@ async def main(page: ft.Page):
             ft.dropdown.Option("telegram-dl", "telegram-dl"),
             ft.dropdown.Option("terabox-dl", "terabox-dl"),
             ft.dropdown.Option("cyberdrop-dl", "cyberdrop-dl"),
+            ft.dropdown.Option("anypic-dl", "anypic-dl"),
         ],
         border_color=BORDER_COLOR,
         focused_border_color=ACCENT_CYAN,

@@ -107,6 +107,7 @@ class ConfigManager:
             "gallery-dl": 4,
             "terabox-dl": 2,
             "cyberdrop-dl": 2,
+            "anypic-dl": 2,
         },
         "domain_limits": {
             "max_per_domain": 1,
@@ -175,6 +176,18 @@ class ConfigManager:
             "include_audio": True,
             "include_video": True,
             "include_images": True,
+        },
+        "anypic_dl": {
+            "min_width": 250,
+            "min_height": 250,
+            "max_images_per_page": 300,
+            "best_only": 0,
+            "workers": 6,
+            "timeout": 30,
+            "retries": 3,
+            "dedup": True,
+            "browser_enabled": True,
+            "config_file": "configs/anypic-dl.json",
         },
     }
 
@@ -359,6 +372,8 @@ class ConfigManager:
         "terabox_dl": "engine_limits.terabox-dl",
         "cyberdrop-dl": "engine_limits.cyberdrop-dl",
         "cyberdrop_dl": "engine_limits.cyberdrop-dl",
+        "anypic-dl": "engine_limits.anypic-dl",
+        "anypic_dl": "engine_limits.anypic-dl",
         "archive_enabled": "archive.enabled",
         "archive-enabled": "archive.enabled",
         "db_path": "archive.db_path",

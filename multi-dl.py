@@ -355,14 +355,15 @@ def print_banner(config: ConfigManager, archive: ArchiveManager) -> None:
         right = pad_total - left
         return f"{Style.CYAN}║{Style.RESET}{' ' * left}{text}{' ' * right}{Style.CYAN}║{Style.RESET}"
 
-    # Five engine badges evenly spaced in between and at both ends
-    engine_names = ["yt-dlp", "gallery-dl", "terabox-dl", "telegram-dl", "cyberdrop-dl"]
+    # Engine badges evenly spaced in between and at both ends
+    engine_names = ["yt-dlp", "gallery-dl", "terabox-dl", "telegram-dl", "cyberdrop-dl", "anypic-dl"]
     badges = [Style.engine_badge(name) for name in engine_names]
     total_badge_w = sum(len(re.sub(r'\033\[[0-9;]*[a-zA-Z]', '', b)) for b in badges)
     rem_space = inner_width - total_badge_w
-    gap = max(1, rem_space // 6)
-    margin = (rem_space - (gap * 4)) // 2
-    extra = (rem_space - (gap * 4)) % 2
+    gap_count = max(1, len(badges) - 1)
+    gap = max(1, rem_space // (gap_count + 2))
+    margin = max(0, (rem_space - (gap * gap_count)) // 2)
+    extra = max(0, (rem_space - (gap * gap_count)) % 2)
     badge_line = (" " * margin) + (" " * gap).join(badges) + (" " * (margin + extra))
 
     bar = "═" * inner_width
@@ -1329,7 +1330,7 @@ def main():
         direct_parser.add_argument("urls", nargs="*", help="Media URLs or text file paths to download")
         direct_parser.add_argument("-f", "--file", "--input", dest="file", help="Path to text file containing URLs")
         direct_parser.add_argument("-c", "--concurrency", type=int, help="Number of concurrent worker streams")
-        direct_parser.add_argument("-b", "--backend", help="Force specific backend (yt-dlp, gallery-dl, terabox-dl, telegram-dl, cyberdrop-dl)")
+        direct_parser.add_argument("-b", "--backend", help="Force specific backend (yt-dlp, gallery-dl, terabox-dl, telegram-dl, cyberdrop-dl, anypic-dl)")
         direct_parser.add_argument("--format", help="Format selection string (e.g. bestvideo*+bestaudio/best)")
         direct_parser.add_argument("-x", "--extract-audio", "--audio-only", dest="audio_only", action="store_true", help="Extract audio only (converts to mp3 / audio format)")
         direct_parser.add_argument("--audio-format", help="Audio format when extracting audio (mp3, m4a, flac, wav, opus)")
@@ -1475,7 +1476,7 @@ def main():
     dl_parser.add_argument("urls", nargs="*", help="Media URLs or text file paths to download")
     dl_parser.add_argument("-f", "--file", "--input", dest="file", help="Path to text file containing URLs")
     dl_parser.add_argument("-c", "--concurrency", type=int, help="Number of concurrent worker streams")
-    dl_parser.add_argument("-b", "--backend", help="Force specific backend (yt-dlp, gallery-dl, terabox-dl, telegram-dl, cyberdrop-dl)")
+    dl_parser.add_argument("-b", "--backend", help="Force specific backend (yt-dlp, gallery-dl, terabox-dl, telegram-dl, cyberdrop-dl, anypic-dl)")
     dl_parser.add_argument("--format", help="Format selection string")
     dl_parser.add_argument("-x", "--extract-audio", "--audio-only", dest="audio_only", action="store_true", help="Extract audio only (converts to mp3 / audio format)")
     dl_parser.add_argument("--audio-format", help="Audio format when extracting audio (mp3, m4a, flac, wav, opus)")

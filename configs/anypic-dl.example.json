@@ -1,0 +1,20 @@
+{
+  "// ─── MULTI_DOWNLOADER: anypic-dl Modular Configuration ───": "",
+  "// Generic image-page engine: original-resolution images from pages no other engine owns": "",
+  "// Minimum image dimensions to keep (a page with nothing above min relaxes to relaxed_min)": "",
+  "min_width": 250,
+  "min_height": 250,
+  "// Download at most this many images per page": "",
+  "max_images_per_page": 300,
+  "// >0: download only the N largest images per page": "",
+  "best_only": 0,
+  "// Concurrent probe/download workers": "",
+  "workers": 6,
+  "// Network timeout and retry count (seconds / attempts)": "",
+  "timeout": 30,
+  "retries": 3,
+  "// URL+content-hash deduplication via data/anypic/state.sqlite": "",
+  "dedup": true,
+  "// Playwright browser fallback for JS-only / lazy-load pages (requires: pip install playwright && playwright install chromium)": "",
+  "browser_enabled": true
+}

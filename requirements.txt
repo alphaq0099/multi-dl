@@ -9,3 +9,9 @@ pillow>=10.0.0
 python-dotenv>=1.0.0
 requests[socks]>=2.32.0,<3
 python-socks[asyncio]>=2.4.0,<3
+
+# anypic-dl engine (vendored generic image-page downloader)
+beautifulsoup4>=4.12
+rich>=13.0
+cloudscraper>=1.2
+curl_cffi>=0.5

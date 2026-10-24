@@ -1,6 +1,6 @@
 # MULTI_DOWNLOADER
 
-> A modern, unified multi-platform downloader orchestrating [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), [`gallery-dl`](https://github.com/mikf/gallery-dl), [`terabox-dl`](https://github.com/Alex-0099/Terabox-DL), [`telegram-dl`](https://github.com/Alex-0099/Telegram-dl), and [`cyberdrop-dl`](https://github.com/Cyberdrop-DL/cyberdrop-dl) with isolated configurations, shared SQLite deduplication archive, persistent priority queue, two-way automatic failover, and interactive terminal interface.
+> A modern, unified multi-platform downloader orchestrating [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), [`gallery-dl`](https://github.com/mikf/gallery-dl), [`terabox-dl`](https://github.com/Alex-0099/Terabox-DL), [`telegram-dl`](https://github.com/Alex-0099/Telegram-dl), [`cyberdrop-dl`](https://github.com/Cyberdrop-DL/cyberdrop-dl), and [`anypic-dl`](https://github.com/Alex-0099) with isolated configurations, shared SQLite deduplication archive, persistent priority queue, two-way automatic failover, and interactive terminal interface.
 
 **Current Version:** `v4.7.0`
 
@@ -360,6 +360,7 @@ This tool orchestrates and relies on the following open-source projects:
 * [**cyberdrop-dl**](https://github.com/Cyberdrop-DL/cyberdrop-dl) — Bulk file and forum scraper for lockers, forums, and multi-host aggregators.
 * [**Telegram-dl**](https://github.com/Alex-0099/Telegram-dl) & [**Telethon**](https://github.com/LonamiWebs/Telethon) — Fast, asynchronous MTProto Python client for Telegram media downloads.
 * [**Terabox-DL**](https://github.com/Alex-0099/Terabox-DL) — Direct link extractor and resumable chunked-stream downloader for TeraBox.
+* [**anypic-dl**](https://github.com/Alex-0099) — Bundled generic image-page engine: resolves original-resolution images from pages no other engine owns (static HTTP, optional Playwright fallback).
 * [**FFmpeg**](https://ffmpeg.org/) — Cross-platform multimedia framework for stream muxing, remuxing, and post-processing.
 * [**curl_cffi**](https://github.com/yifeikong/curl_cffi) — Python binding for `curl-impersonate` enabling browser TLS fingerprint emulation.
 

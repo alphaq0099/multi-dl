@@ -33,6 +33,7 @@ data/batch_queue.json
 data/batches/
 data/last_batch.json
 data/pending_archive/
+data/anypic/
 data/transient/
 data/gallery_locks/
 data/live_queue.json

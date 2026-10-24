@@ -51,6 +51,7 @@ class QueueManager:
         "gallery-dl": 4,
         "terabox-dl": 2,
         "cyberdrop-dl": 2,
+        "anypic-dl": 2,
     }
 
     def __init__(self, queue_file: Optional[Path] = None):

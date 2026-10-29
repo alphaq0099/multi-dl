@@ -49,6 +49,7 @@ node_modules/
 tools/
 .pytest_cache/
 *.png
+!assets/*.png
 
 # Comments
 testing.txt

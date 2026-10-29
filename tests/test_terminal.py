@@ -315,7 +315,7 @@ def test_print_batch_summary_alignment(capsys):
         failed_count=0,
         total_bytes=35776102,
         elapsed_seconds=790.0,
-        saved_path=r"~downloads\gallery-dl\nhentai\455929 [Koutetsu Shabon Dama...]",
+        saved_path=r"~downloads\gallery-dl\artstation\455929 [Digital Fantasy Art...]",
     )
     out = capsys.readouterr().out
     clean_lines = [re.sub(r'\033\[[0-9;]*[a-zA-Z]', '', line).strip() for line in out.splitlines()]
@@ -397,9 +397,9 @@ def test_pending_queue_rendering_bounded_overflow(capsys):
 
     # 5 pending items waiting in queue
     pending = [
-        ("gallery-dl", "https://nhentai.net/g/111111/"),
-        ("gallery-dl", "https://nhentai.net/g/222222/"),
-        ("gallery-dl", "https://nhentai.net/g/333333/"),
+        ("gallery-dl", "https://danbooru.donmai.us/posts/111111"),
+        ("gallery-dl", "https://danbooru.donmai.us/posts/222222"),
+        ("gallery-dl", "https://danbooru.donmai.us/posts/333333"),
         ("yt-dlp", "https://youtube.com/watch?v=444444"),
         ("telegram-dl", "https://t.me/c/555555/1"),
     ]
@@ -437,8 +437,8 @@ def test_slot_row1_extractor_and_container_format(capsys):
     from core.terminal import MultiBarManager
 
     mb = MultiBarManager(max_slots=3, is_tty=True)
-    # Slot 1: Active with erome album URL and resolved album title
-    mb.assign_slot("task-1", "gallery-dl", "https://www.erome.com/a/W2FMvOUd", extractor="erome", container_title="Live da moreninha")
+    # Slot 1: Active with album URL and resolved album title
+    mb.assign_slot("task-1", "gallery-dl", "https://danbooru.donmai.us/posts/1234567", extractor="danbooru", container_title="Summer Festival")
     mb.update_slot(
         slot_id=1,
         percent=83.3,
@@ -446,9 +446,9 @@ def test_slot_row1_extractor_and_container_format(capsys):
         speed=192000,
         file_index=5,
         total_files=6,
-        status_message="qh2ZK7jV Live da moreninha g.mp4",
-        extractor="erome",
-        container_title="Live da moreninha",
+        status_message="qh2ZK7jV Summer Festival g.mp4",
+        extractor="danbooru",
+        container_title="Summer Festival",
     )
     # Remaining slots are idle
     mb.set_queue_counts(remaining=15, completed=21, failed=0)
@@ -457,8 +457,8 @@ def test_slot_row1_extractor_and_container_format(capsys):
     out = capsys.readouterr().out
     assert "[Downloader]:" not in out
     assert "[gallery-dl]" in out
-    assert "[erome]" in out
-    assert "Live da moreninha" in out
+    assert "[danbooru]" in out
+    assert "Summer Festival" in out
     # Line 2 file details
     assert "83.3%" in out
     assert "5/6" in out

@@ -80,8 +80,8 @@ def main() -> int:
 
         # 6) page slugs: last path segment, sanitized; root URLs get a timestamp
         from anypic.downloader import _page_slug
-        if _page_slug("https://telegra.ph/nude-indian-girls-club-09-10") != "nude-indian-girls-club-09-10":
-            failures.append(f"page slug wrong: {_page_slug('https://telegra.ph/nude-indian-girls-club-09-10')}")
+        if _page_slug("https://telegra.ph/sample-photo-collection-09-10") != "sample-photo-collection-09-10":
+            failures.append(f"page slug wrong: {_page_slug('https://telegra.ph/sample-photo-collection-09-10')}")
         if _page_slug("https://x.com/blog/My Post?utm=1") != "My Post":
             failures.append(f"page slug should ignore query: {_page_slug('https://x.com/blog/My Post?utm=1')}")
         root_slug = _page_slug("https://example.com/")

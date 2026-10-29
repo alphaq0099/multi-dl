@@ -24,8 +24,8 @@ def test_terabox_can_handle():
     assert backend.can_handle("https://terabox.com/s/1ABCxyz") is True
     assert backend.can_handle("https://1024tera.com/sharing/link?surl=ABCxyz") is True
     assert backend.can_handle("https://www.1024tera.com/s/1ABCxyz") is True
-    assert backend.can_handle("https://1024terabox.com/s/1K3gVFhIrkT1LuTqOuY2_jA") is True
-    assert backend.can_handle("https://www.1024terabox.com/s/1K3gVFhIrkT1LuTqOuY2_jA") is True
+    assert backend.can_handle("https://1024terabox.com/s/1SampleKey_12345") is True
+    assert backend.can_handle("https://www.1024terabox.com/s/1SampleKey_12345") is True
     assert backend.can_handle("https://tibibox.com/s/1sample") is True
     assert backend.can_handle("https://freeterabox.com/s/1sample") is True
     assert backend.can_handle("https://mirrobox.com/s/1sample") is True
@@ -124,12 +124,12 @@ def test_terabox_router_integration():
     routed_1024 = router.route("https://1024tera.com/sharing/link?surl=1ABCxyz")
     assert routed_1024.name == "terabox-dl"
 
-    routed_1024terabox = router.route("https://1024terabox.com/s/1K3gVFhIrkT1LuTqOuY2_jA")
+    routed_1024terabox = router.route("https://1024terabox.com/s/1SampleKey_12345")
     assert routed_1024terabox.name == "terabox-dl"
 
     # Fast detection test (ensuring x.com substring in 1024terabox does NOT falsely trigger gallery-dl)
-    assert URLRouter.detect_backend_name("https://1024terabox.com/s/1K3gVFhIrkT1LuTqOuY2_jA") == "terabox-dl"
-    assert URLRouter.match("https://1024terabox.com/s/1K3gVFhIrkT1LuTqOuY2_jA").backend == "terabox-dl"
+    assert URLRouter.detect_backend_name("https://1024terabox.com/s/1SampleKey_12345") == "terabox-dl"
+    assert URLRouter.match("https://1024terabox.com/s/1SampleKey_12345").backend == "terabox-dl"
     assert URLRouter.detect_backend_name("https://x.com/jack/status/20") == "gallery-dl"
 
     # Verify site/host folder normalization
@@ -139,7 +139,7 @@ def test_terabox_router_integration():
     host_id_1024 = URLRouter.get_host_identifier("https://1024tera.com/s/1ABCxyz", "terabox-dl")
     assert host_id_1024 == "terabox"
 
-    host_id_1024terabox = URLRouter.get_host_identifier("https://1024terabox.com/s/1K3gVFhIrkT1LuTqOuY2_jA", "terabox-dl")
+    host_id_1024terabox = URLRouter.get_host_identifier("https://1024terabox.com/s/1SampleKey_12345", "terabox-dl")
     assert host_id_1024terabox == "terabox"
 
 
@@ -280,7 +280,7 @@ def test_non_interactive_auth_errno(monkeypatch):
 
 
 def test_terabox_get_base_url():
-    assert TeraboxDlBackend.get_base_url("https://1024terabox.com/s/1K3gVFhIrkT1LuTqOuY2_jA") == "https://1024terabox.com"
+    assert TeraboxDlBackend.get_base_url("https://1024terabox.com/s/1SampleKey_12345") == "https://1024terabox.com"
     assert TeraboxDlBackend.get_base_url("https://www.1024tera.com/s/1sample") == "https://www.1024tera.com"
     assert TeraboxDlBackend.get_base_url("https://teraboxlink.com/s/1sample") == "https://teraboxlink.com"
     assert TeraboxDlBackend.get_base_url("https://www.terabox.com/s/1sample") == "https://www.terabox.com"

@@ -286,12 +286,12 @@ def test_resolve_input_urls_with_text_file(tmp_path):
     sample_file = tmp_path / "links.txt"
     sample_file.write_text(
         "# Header comment\n"
-        "https://youtu.be/BZziHPgE_MI\n"
+        "https://youtu.be/sample_video_1\n"
         "\n"
-        "https://nhentai.net/g/633508/\n"
-        "   https://youtu.be/eMys566gEbg   \n"
+        "https://danbooru.donmai.us/posts/633508\n"
+        "   https://youtu.be/sample_video_2   \n"
         "# Another comment\n"
-        "https://teraboxlink.com/s/1yjwKQEm9J_RBnjbHbG34nw\n"
+        "https://teraboxlink.com/s/1sample_link\n"
         "\n",
         encoding="utf-8"
     )
@@ -300,10 +300,10 @@ def test_resolve_input_urls_with_text_file(tmp_path):
     assert len(sources) == 1
     assert str(sample_file) in sources[0]
     assert len(extracted) == 4
-    assert extracted[0] == "https://youtu.be/BZziHPgE_MI"
-    assert extracted[1] == "https://nhentai.net/g/633508/"
-    assert extracted[2] == "https://youtu.be/eMys566gEbg"
-    assert extracted[3] == "https://teraboxlink.com/s/1yjwKQEm9J_RBnjbHbG34nw"
+    assert extracted[0] == "https://youtu.be/sample_video_1"
+    assert extracted[1] == "https://danbooru.donmai.us/posts/633508"
+    assert extracted[2] == "https://youtu.be/sample_video_2"
+    assert extracted[3] == "https://teraboxlink.com/s/1sample_link"
 
 
 def test_resolve_input_urls_mixed_file_and_urls(tmp_path):
@@ -365,9 +365,9 @@ async def test_three_links_concurrent_slot_allocation(tmp_path):
     qm = QueueManager(queue_file)
 
     links = [
-        "https://youtu.be/Sy_X33lcg9g",
-        "https://nhentai.net/g/361344/",
-        "https://nhentai.net/g/576655/",
+        "https://youtu.be/sample_video_3",
+        "https://danbooru.donmai.us/posts/361344",
+        "https://danbooru.donmai.us/posts/576655",
     ]
     qm.add_batch(links)
 
@@ -378,7 +378,7 @@ async def test_three_links_concurrent_slot_allocation(tmp_path):
 
     mock_gdl = MagicMock()
     mock_gdl.name = "gallery-dl"
-    mock_gdl.can_handle.side_effect = lambda u: "nhentai" in u
+    mock_gdl.can_handle.side_effect = lambda u: "danbooru" in u
 
     active_slots_seen = set()
 
@@ -420,11 +420,11 @@ def test_forum_routing_to_gallery_dl():
     from core.router import URLRouter
 
     forum_urls = [
-        "https://forums.socialmediagirls.com/threads/jhennifer_rodriguess_.363022/post-5394644",
-        "https://socialmediagirls.com/threads/model-name.12345/",
+        "https://forums.socialmediagirls.com/threads/sample_thread.363022/post-5394644",
+        "https://socialmediagirls.com/threads/sample_user.12345/",
         "https://simpcity.su/threads/thread-name.999/",
         "https://simpcity.to/threads/thread-name.888/",
-        "https://vipergirls.to/threads/12345",
+        "https://vipergirls.to/threads/sample_thread_12345",
         "https://randomforum.com/threads/photo-pack.555/",
     ]
     for url in forum_urls:
@@ -442,13 +442,13 @@ async def test_single_download_summary_printed(tmp_path, capsys):
 
     queue_file = tmp_path / "single_summary_queue.json"
     qm = QueueManager(queue_file)
-    qm.add("https://nhentai.net/g/533286/")
+    qm.add("https://danbooru.donmai.us/posts/533286")
 
     mock_gdl = MagicMock()
     mock_gdl.name = "gallery-dl"
     mock_gdl.can_handle.return_value = True
 
-    saved_file = tmp_path / "downloads" / "gallery-dl" / "nhentai" / "533286" / "001.jpg"
+    saved_file = tmp_path / "downloads" / "gallery-dl" / "danbooru" / "533286" / "001.jpg"
     saved_file.parent.mkdir(parents=True, exist_ok=True)
     saved_file.write_text("test")
 
@@ -461,7 +461,7 @@ async def test_single_download_summary_printed(tmp_path, capsys):
             file_hash=None,
             file_size=1024,
             backend="gallery-dl",
-            source_site="nhentai",
+            source_site="danbooru",
         )
 
     mock_gdl.download = AsyncMock(side_effect=mock_dl)

@@ -147,7 +147,7 @@ def test_global_proxy_inheritance(tmp_path):
 def test_domain_extraction():
     """Verifies hostname extraction from diverse URLs."""
     assert extract_url_domain("https://www.youtube.com/watch?v=123") == "www.youtube.com"
-    assert extract_url_domain("http://cam4.com/model") == "cam4.com"
+    assert extract_url_domain("http://example.com/model") == "example.com"
     assert extract_url_domain("https://sub.domain.org:8080/path") == "sub.domain.org"
     assert extract_url_domain("invalid-url") == ""
 
@@ -342,6 +342,6 @@ def test_cross_directory_path_anchoring():
     assert cm.PROJECT_ROOT in qm.queue_file.parents
 
     # Router handles hotpic2
-    assert URLRouter.detect_backend_name("https://hotpic2.cc/album/45oGqtErHtZuT") == "cyberdrop-dl"
-    assert URLRouter.detect_backend_name("https://www.hotpic2.cc/album/45oGqtErHtZuT") == "cyberdrop-dl"
+    assert URLRouter.detect_backend_name("https://hotpic2.cc/album/sample_album_123") == "cyberdrop-dl"
+    assert URLRouter.detect_backend_name("https://www.hotpic2.cc/album/sample_album_123") == "cyberdrop-dl"
 

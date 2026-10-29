@@ -21,7 +21,7 @@ def frame_text(manager):
 
 def test_waiting_job_is_not_reported_as_downloading():
     display = MultiBarManager(max_slots=3, is_tty=False)
-    sid = display.assign_slot('one', 'gallery-dl', 'https://nhentai.net/g/107374/')
+    sid = display.assign_slot('one', 'gallery-dl', 'https://danbooru.donmai.us/posts/107374')
     display.update_slot(sid, phase='resolving', status_message='Fetching metadata')
     text = frame_text(display)
     assert 'Fetching metadata' in text
@@ -34,7 +34,7 @@ def test_waiting_job_is_not_reported_as_downloading():
 
 def test_album_count_and_current_file_bytes_are_distinct():
     display = MultiBarManager(max_slots=3, is_tty=False)
-    sid = display.assign_slot('one', 'gallery-dl', 'Album title', extractor='nhentai')
+    sid = display.assign_slot('one', 'gallery-dl', 'Album title', extractor='danbooru')
     display.update_slot(sid, phase='downloading', downloaded=20 * 1024**2, percent=0,
                         total_files=48, file_index=0, completed_files=0,
                         file_name='page001.png', file_downloaded_bytes=384 * 1024,
@@ -61,7 +61,7 @@ def test_processing_clears_stale_speed_and_preserves_last_bytes(tracker_type):
 
 def test_assigning_slot_retires_exactly_one_pending_row_atomically():
     display = MultiBarManager(max_slots=2, is_tty=False)
-    url = 'https://nhentai.net/g/107374/'
+    url = 'https://danbooru.donmai.us/posts/107374'
     display.set_pending_items([('gallery-dl', url)])
     display.assign_slot('one', 'gallery-dl', url)
     text = frame_text(display)
@@ -77,7 +77,7 @@ def test_canvas_preserves_width_height_and_footer(monkeypatch, columns, rows):
     monkeypatch.setattr('core.terminal.shutil.get_terminal_size', lambda *args: os.terminal_size((columns, rows)))
     display = MultiBarManager(max_slots=3, is_tty=False)
     for index in range(3):
-        sid = display.assign_slot(str(index), 'gallery-dl', '長いアルバム名：' * 12, extractor='nhentai')
+        sid = display.assign_slot(str(index), 'gallery-dl', '長いアルバム名：' * 12, extractor='danbooru')
         display.update_slot(sid, phase='downloading', total_files=48, completed_files=index,
                             file_downloaded_bytes=1000, file_total_bytes=5000, speed=2000)
     display.set_pending_items([('telegram-dl', 'https://t.me/channel/123', 'Waiting for telegram-dl worker')] * 4)
@@ -93,7 +93,7 @@ def test_canvas_preserves_width_height_and_footer(monkeypatch, columns, rows):
 def test_queue_displays_guard_reason_and_protects_repeated_urls(tmp_path):
     config = ConfigManager(tmp_path / 'config.json')
     queue = QueueManager(tmp_path / 'queue.json')
-    first = queue.add('https://nhentai.net/g/1/', backend='gallery-dl')
+    first = queue.add('https://danbooru.donmai.us/posts/1/', backend='gallery-dl')
     repeat = queue.add(first.url, backend='gallery-dl')
     third = queue.add('https://example.com/other.jpg', backend='gallery-dl')
     queue.mark_status(first.id, TaskStatus.DOWNLOADING)
@@ -141,7 +141,7 @@ def test_concurrent_slots_keep_two_content_rows_through_stage_changes(monkeypatc
     monkeypatch.setattr('core.terminal.shutil.get_terminal_size', lambda *args: os.terminal_size((120, 32)))
     display = MultiBarManager(max_slots=3, is_tty=False)
     for index in range(3):
-        display.assign_slot(str(index), 'gallery-dl', f'Album {index}', extractor='nhentai')
+        display.assign_slot(str(index), 'gallery-dl', f'Album {index}', extractor='danbooru')
     for phase in ('waiting', 'resolving', 'downloading', 'resolving', 'processing'):
         display.update_slot(1, phase=phase, status_message='Fetching next file' if phase == 'resolving' else phase,
                             total_files=28, completed_files=4, file_downloaded_bytes=32768,
@@ -153,6 +153,6 @@ def test_concurrent_slots_keep_two_content_rows_through_stage_changes(monkeypatc
         assert len(tops) == len(bottoms) == 3
         assert all(bottom - top == 3 for top, bottom in zip(tops, bottoms))
         for top in tops:
-            assert lines[top + 1].startswith('│ [gallery-dl] • [nhentai] • [Album')
+            assert lines[top + 1].startswith('│ [gallery-dl] • [danbooru] • [Album')
             assert lines[top + 2].startswith('│ [')
         assert '[Downloader]' not in text

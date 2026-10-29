@@ -137,8 +137,8 @@ def test_gallerydl_concurrent_thread_safety():
             errors.append((url, e))
 
     urls = [
-        "https://nhentai.net/g/361344/",
-        "https://nhentai.net/g/576655/",
+        "https://imgur.com/gallery/sample1",
+        "https://imgur.com/gallery/sample2",
         "https://imgur.com/gallery/abcde",
         "https://danbooru.donmai.us/posts/12345",
     ]
@@ -195,26 +195,26 @@ def test_gallerydl_bunkr_album_folder_title_resolution():
     # 1. Bunkr metadata passed to on_directory
     bunkr_meta = {
         "album_id": "BnSIi8je",
-        "album_name": "faixa",
+        "album_name": "nature_photos",
         "album_size": "100.56 MB",
         "count": 30,
         "category": "bunkr",
         "subcategory": "album",
     }
     tracker.on_directory(bunkr_meta)
-    assert tracker.album_title == "faixa (BnSIi8je)"
+    assert tracker.album_title == "nature_photos (BnSIi8je)"
     assert tracker.total_files == 30
 
     # 2. Start file transfer
-    tracker.start(r"C:\downloads\gallery-dl\bunkr\faixa (BnSIi8je)\eromedia.app_video_1791562031346_zy5vbq0g3ec.mp4")
+    tracker.start(r"C:\downloads\gallery-dl\bunkr\nature_photos (BnSIi8je)\sample_video_1791562031346_clip.mp4")
     tracker.progress(52000000, 26000000, 40000000)
 
     # The latest progress object should have:
-    # Row 1 Title: faixa (BnSIi8je)
-    # Row 2 Active file: eromedia.app_video_1791562031346_zy5vbq0g3ec.mp4
+    # Row 1 Title: nature_photos (BnSIi8je)
+    # Row 2 Active file: sample_video_1791562031346_clip.mp4
     last_prog = captured[-1]
-    assert last_prog.current_file == "faixa (BnSIi8je)"
-    assert last_prog.status_message == "eromedia.app_video_1791562031346_zy5vbq0g3ec.mp4"
+    assert last_prog.current_file == "nature_photos (BnSIi8je)"
+    assert last_prog.status_message == "sample_video_1791562031346_clip.mp4"
     assert last_prog.total_files == 30
 
 

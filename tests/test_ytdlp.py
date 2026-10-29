@@ -78,6 +78,6 @@ def test_ytdlp_impersonate_target_resolution():
     assert YtDlpBackend._resolve_impersonate_target(None) is None
 
 
-def test_ytdlp_cam4_can_handle():
+def test_ytdlp_generic_stream_can_handle():
     backend = YtDlpBackend()
-    assert backend.can_handle("https://www.cam4.com/corierando") is True
+    assert backend.can_handle("https://soundcloud.com/sample-artist/track-name") is True

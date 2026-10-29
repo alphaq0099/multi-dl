@@ -157,7 +157,7 @@ def test_is_container_url():
     assert URLRouter.is_container_url("https://www.instagram.com/reel/DAabcdefg/") is False
     assert URLRouter.is_container_url("https://x.com/user/status/1234567890") is False
     assert URLRouter.is_container_url("https://twitter.com/user/status/1234567890") is False
-    assert URLRouter.is_container_url("https://bunkr.cr/f/yIGyFuTLrdVVS") is False
+    assert URLRouter.is_container_url("https://bunkr.cr/f/sample_file_123") is False
     assert URLRouter.is_container_url("https://bunkr.cr/v/testvideo123") is False
     assert URLRouter.is_container_url("https://t.me/channel/42") is False
     assert URLRouter.is_container_url("https://example.com/direct_video.mp4") is False
@@ -170,7 +170,7 @@ def test_is_container_url():
     assert URLRouter.is_container_url("https://www.instagram.com/artist_profile/") is True
     assert URLRouter.is_container_url("https://x.com/user/media") is True
     assert URLRouter.is_container_url("https://x.com/user/likes") is True
-    assert URLRouter.is_container_url("https://bunkr.cr/a/MYwOPfwS") is True
+    assert URLRouter.is_container_url("https://bunkr.cr/a/sample_album_123") is True
     assert URLRouter.is_container_url("https://t.me/telegram_channel") is True
     assert URLRouter.is_container_url("https://reddit.com/r/pics") is True
     assert URLRouter.is_container_url("https://simpcity.su/threads/sample-thread.1234/") is True
@@ -233,7 +233,7 @@ async def test_dispatcher_does_not_skip_container_even_if_in_archive(tmp_path: P
     # Record container URL
     archive.add_entry(
         ArchiveEntry(
-            url="https://bunkr.cr/a/MYwOPfwS",
+            url="https://bunkr.cr/a/sample_album_123",
             file_path=str(tmp_path),
             file_name="AlbumFolder",
             backend="gallery-dl",
@@ -252,7 +252,7 @@ async def test_dispatcher_does_not_skip_container_even_if_in_archive(tmp_path: P
     }.get((sec, key), def_val)
 
     queue = QueueManager(tmp_path / "queue.json")
-    item = queue.add_batch(["https://bunkr.cr/a/MYwOPfwS"], backend="gallery-dl")[0]
+    item = queue.add_batch(["https://bunkr.cr/a/sample_album_123"], backend="gallery-dl")[0]
 
     dispatcher = QueueDispatcher(config=mock_config, queue_manager=queue, archive=archive)
 
@@ -260,7 +260,7 @@ async def test_dispatcher_does_not_skip_container_even_if_in_archive(tmp_path: P
     mock_backend = MagicMock()
     mock_backend.download = AsyncMock(
         return_value=ArchiveEntry(
-            url="https://bunkr.cr/a/MYwOPfwS",
+            url="https://bunkr.cr/a/sample_album_123",
             file_path=str(tmp_path / "new_album"),
             file_name="new_album",
             backend="gallery-dl",
